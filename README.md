@@ -145,18 +145,22 @@ uv pip install -e .
 ### 5. Download CUB-200-2011
 
 ```bash
-mkdir -p data/cub200
-# Download from the official source and extract:
-# https://data.caltech.edu/records/65de6-vp158
-# The expected layout after extraction:
-# data/CUB_200_2011/CUB_200_2011/
-#     images/
-#     train_test_split.txt
-#     classes.txt
-#     image_class_labels.txt
-# Dataset is also available on Kaggle.
+# Download from the official source (also available on Kaggle)
 wget https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz
-tar -xzf CUB_200_2011.tgz -C data/cub200 --strip-components=1
+tar -xzf CUB_200_2011.tgz -C data/
+```
+
+The tarball extracts into a double-nested directory. The expected layout
+after extraction — which matches the `CUB200_ROOT` constant in `src/constants.py`:
+
+```
+data/
+└── CUB_200_2011/
+    └── CUB_200_2011/
+        ├── images/
+        ├── train_test_split.txt
+        ├── image_class_labels.txt
+        └── classes.txt
 ```
 
 ---

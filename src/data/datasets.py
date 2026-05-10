@@ -34,20 +34,16 @@ class CUB200Dataset(Dataset):
 
     def _parse_annotations(self) -> None:
         images = self._load_id_map("images.txt")
-        labels = {
-            int(iid): int(cls) - 1  # re-index to 0-based
-            for iid, cls in (
-                line.strip().split() for line in
-                (self.root / "image_class_labels.txt").open()
-            )
-        }
-        is_train_flag = {
-            int(iid): int(flag) == 1
-            for iid, flag in (
-                line.strip().split() for line in
-                (self.root / "train_test_split.txt").open()
-            )
-        }
+        with (self.root / "image_class_labels.txt").open() as f:
+            labels = {
+                int(iid): int(cls) - 1  # re-index to 0-based
+                for iid, cls in (line.strip().split() for line in f)
+            }
+        with (self.root / "train_test_split.txt").open() as f:
+            is_train_flag = {
+                int(iid): int(flag) == 1
+                for iid, flag in (line.strip().split() for line in f)
+            }
         bboxes = self._load_bboxes() if self.use_bbox_crop else {}
 
         train_ids = sorted(iid for iid, flag in is_train_flag.items() if flag)
@@ -72,16 +68,18 @@ class CUB200Dataset(Dataset):
 
     def _load_id_map(self, filename: str) -> dict[int, str]:
         result = {}
-        for line in (self.root / filename).open():
-            iid, value = line.strip().split(maxsplit=1)
-            result[int(iid)] = value
+        with (self.root / filename).open() as f:
+            for line in f:
+                iid, value = line.strip().split(maxsplit=1)
+                result[int(iid)] = value
         return result
 
     def _load_bboxes(self) -> dict[int, tuple[float, float, float, float]]:
         bboxes = {}
-        for line in (self.root / "bounding_boxes.txt").open():
-            iid, x, y, w, h = line.strip().split()
-            bboxes[int(iid)] = (float(x), float(y), float(w), float(h))
+        with (self.root / "bounding_boxes.txt").open() as f:
+            for line in f:
+                iid, x, y, w, h = line.strip().split()
+                bboxes[int(iid)] = (float(x), float(y), float(w), float(h))
         return bboxes
 
 

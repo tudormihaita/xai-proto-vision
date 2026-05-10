@@ -97,7 +97,7 @@ class PrototypeModel(BaseModel, ABC):
         added as additional keys and logged separately by the Trainer.
         """
 
-    def push_prototypes(self, train_loader, device: str | torch.device) -> None:
+    def push_prototypes(self, train_loader) -> None:
         """
         Scans the full training set and anchors each prototype to the nearest
         real training patch. No-op in the base class; overridden by ProtoPNet

@@ -37,4 +37,4 @@ def load_dataset(
             **dataset_kwargs,
         )
 
-    raise ValueError(f"Unknown dataset {name!r}. Supported: ${", ".join(SUPPORTED_DATASETS)}")
+    raise ValueError(f"Unknown dataset {name!r}. Supported: {', '.join(SUPPORTED_DATASETS)}")
