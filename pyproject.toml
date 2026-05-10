@@ -1,7 +1,7 @@
 [project]
 name = "xai-proto-vision"
 version = "0.1.0"
-description = "Prototype-based self-interpretable models for fine-grained image classification"
+description = "XAI project for prototype-based self-interpretable models for fine-grained image classification"
 requires-python = ">=3.10"
 dependencies = [
     # torch and torchvision are installed separately — see README setup instructions
@@ -25,6 +25,10 @@ notebooks = [
 dev = [
     "ruff>=0.4.0",
     "pytest>=8.1.0",
+]
+torch = [
+    "torch",
+    "torchvision",
 ]
 
 [build-system]

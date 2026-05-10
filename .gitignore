@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Data directories
+data/*
+!data/.gitkeep
+
+# Results outputs: can be removed later for final versions
+results/*
+!results/.gitkeep
