@@ -228,6 +228,7 @@ def main() -> None:
     csv_path = RESULTS_ROOT / f"{run_tag}_results.csv"
     fields = [
         "method", "run_tag", "accuracy", "topk_accuracy",
+        "macro_precision", "macro_recall", "macro_f1",
         "per_class_acc_mean", "per_class_acc_std",
         "training_time_min", "peak_gpu_memory_mb",
         "num_params", "num_concepts", "inference_time_ms", "flops",
