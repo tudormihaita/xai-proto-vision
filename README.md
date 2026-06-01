@@ -59,8 +59,8 @@ xai-proto-vision/
 │       └── pipnet.py            ← Member D: PIPNet implementation
 │
 ├── scripts/
-│   └── train.py                 ← unified entry point
-│   # python scripts/train.py --method protopnet --dataset cub200 --epochs 100
+│   └── run_train.py             ← unified entry point
+│   # python scripts/run_train.py --method protopnet --dataset cub200 --epochs 100
 │
 ├── experiments/
 │   ├── baseline.sh

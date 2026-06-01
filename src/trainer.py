@@ -11,11 +11,12 @@ class Trainer:
     """
     Generic training loop shared by all models.
 
-    The loop is fixed; method-specific behavior is injected via two hooks:
-      - training_step(): override to add extra loss terms or phased optimization
-      - push_prototypes(): override in ProtoPNet / ProtoTree trainers
+    Method-specific behavior is injected via the model, not via subclassing:
+      - model.compute_loss(): called automatically for PrototypeModel instances
+      - model.push_prototypes(): called automatically at push_epoch for PrototypeModel instances
 
-    Prototype-method trainers should subclass this and override those two hooks.
+    Subclass Trainer and override training_step() only if you need phased
+    optimization (e.g. ProtoPNet's 3-phase training that freezes/unfreezes the backbone).
     Everything else (validation, early stopping, checkpointing) stays the same.
     """
 
@@ -93,10 +94,13 @@ class Trainer:
             for k, v in train_metrics.items(): # extra loss components
                 history.setdefault(k, []).append(v)
 
-            # prototype push step
+            # prototype push step (only relevant for ProtoPNet and ProtoTree)
             if push_epoch is not None and epoch == push_epoch:
-                print("Running prototype push step...")
-                self.push_prototypes(train_loader)
+                if isinstance(self.model, PrototypeModel):
+                    print("Pushing prototypes...")
+                    self.model.push_prototypes(train_loader, self.device)
+                else:
+                    print(f"Warning: --push-epoch set but {type(self.model).__name__} is not a PrototypeModel")
 
             # validation
             if epoch % val_every == 0:
@@ -166,7 +170,7 @@ class Trainer:
                 total += labels.size(0)
 
             if self.log_every > 0 and (i + 1) % self.log_every == 0:
-                step_x = epoch + (i + 1) / n_batches
+                step_x = epoch + i / n_batches
                 step_loss = running.get("total", 0.0) / (i + 1)
                 self._step_log.append((step_x, step_loss))
 
@@ -213,13 +217,6 @@ class Trainer:
             return losses
         loss = self.loss_fn(logits, labels)
         return {"total": loss, "cls": loss, "logits": logits}
-
-    def push_prototypes(self, train_loader) -> None:
-        """
-        No-op in the base Trainer. Overridden by ProtoPNet and ProtoTree
-        trainers to scan the training set and anchor prototypes to real patches.
-        """
-
 
     def save_checkpoint(self, path: str, epoch: int, history: dict) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

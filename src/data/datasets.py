@@ -150,8 +150,18 @@ class StanfordCarsDataset(Dataset):
         train_img_dir = self.root / self._TRAIN_IMG_DIR
         test_img_dir  = self.root / self._TEST_IMG_DIR
 
-        train_samples = self._load_mat(devkit / "cars_train_annos.mat", train_img_dir)
-        test_samples  = self._load_mat(devkit / "cars_test_annos_withlabels.mat", test_img_dir)
+        train_mat = devkit / "cars_train_annos.mat"
+        test_mat  = devkit / "cars_test_annos_withlabels.mat"
+        if not train_mat.exists():
+            raise FileNotFoundError(f"Stanford Cars training annotations not found at {train_mat}.")
+        if not test_mat.exists():
+            raise FileNotFoundError(
+                f"Stanford Cars test annotations not found at {test_mat}.\n"
+                "Download labels file separately."
+            )
+
+        train_samples = self._load_mat(train_mat, train_img_dir)
+        test_samples  = self._load_mat(test_mat, test_img_dir)
 
         rng = random.Random(self.val_seed)
         shuffled = train_samples.copy()

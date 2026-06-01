@@ -8,6 +8,7 @@ from torchinfo import summary
 
 def topk_accuracy(logits: torch.Tensor, labels: torch.Tensor, k: int = 5) -> float:
     """Fraction of samples where the true class appears in the top-k predictions."""
+    k = max(1, min(k, logits.size(1)))
     topk_preds = logits.topk(k, dim=1).indices  # (N, k)
     correct = topk_preds.eq(labels.unsqueeze(1)).any(dim=1)
     return float(correct.float().mean().item())
@@ -78,6 +79,7 @@ def evaluate_model(
     return {
         "accuracy":           accuracy,
         "topk_accuracy":      topk_accuracy(all_logits_t, all_labels_t, k=topk),
+        "topk":               topk,
         "per_class_accuracy": per_class_acc,
         "macro_precision":    float(precision_score(labels, preds, average="macro", zero_division=0)),
         "macro_recall":       float(recall_score(labels, preds, average="macro", zero_division=0)),
@@ -96,9 +98,10 @@ def print_results(results: dict, model_name: str = "") -> None:
         pca_str = f"mean_per_class_acc={results['per_class_accuracy'].mean():.4f}"
     else:
         pca_str = f"mean_per_class_acc={results.get('per_class_acc_mean', float('nan')):.4f}"
+    k = results.get("topk", 5)
     lines = [
         f"{prefix}acc={results['accuracy']:.4f}",
-        f"top5_acc={results['topk_accuracy']:.4f}",
+        f"top{k}_acc={results['topk_accuracy']:.4f}",
         pca_str,
         f"precision={results.get('macro_precision', float('nan')):.4f}",
         f"recall={results.get('macro_recall', float('nan')):.4f}",

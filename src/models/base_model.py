@@ -21,7 +21,7 @@ def build_backbone(name: str) -> tuple[nn.Module, int]:
 
     if name == "vgg16":
         m = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
-        backbone = m.features                                   # final conv output: (B, 512, 7, 7)
+        backbone = m.features # final conv output: (B, 512, 7, 7)
         return backbone, 512
 
     raise ValueError(f"Unknown backbone {name!r}. Supported: 'resnet34', 'vgg16'")
@@ -68,7 +68,7 @@ class BaselineModel(BaseModel):
         return self.classifier(pooled)          # (B, num_classes)
 
     def explain(self, x: torch.Tensor) -> dict:
-        """Returns the spatial feature map — useful for CAM-style visualisation."""
+        """Returns the spatial feature map — useful for CAM-style visualization."""
         with torch.no_grad():
             features = self.backbone(x) # (B, C, H, W)
             logits = self.classifier(self.pool(features).flatten(1))
@@ -97,7 +97,7 @@ class PrototypeModel(BaseModel, ABC):
         added as additional keys and logged separately by the Trainer.
         """
 
-    def push_prototypes(self, train_loader) -> None:
+    def push_prototypes(self, train_loader, device: str | torch.device) -> None:
         """
         Scans the full training set and anchors each prototype to the nearest
         real training patch. No-op in the base class; overridden by ProtoPNet
@@ -105,7 +105,7 @@ class PrototypeModel(BaseModel, ABC):
         """
 
     def get_backbone_params(self):
-        """Returns backbone parameters for selective optimisation."""
+        """Returns backbone parameters for selective optimization."""
         return self.backbone.parameters()
 
     @abstractmethod
