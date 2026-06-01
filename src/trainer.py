@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from tqdm.auto import tqdm
 
-from src.models import BaselineModel, PrototypeModel
+from src.models import PrototypeModel
 
 
 class Trainer:
@@ -26,12 +26,15 @@ class Trainer:
         loss_fn: nn.Module,
         device: str | torch.device,
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+        log_every: int = 0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.device = device
         self.scheduler = scheduler
+        self.log_every = log_every  # log intra-epoch every N batches; 0 = epoch-level only
+        self._step_log: list[tuple[float, float]] = []
 
 
     def train(
@@ -42,6 +45,7 @@ class Trainer:
         val_every: int = 1,
         push_epoch: int | None = None,
         patience: int = 10,
+        checkpoint_path: str | None = None,
     ) -> dict:
         """
         Runs the full training loop and returns a history dict ready for plotting:
@@ -60,11 +64,16 @@ class Trainer:
         :param val_every:     validate every N epochs (default: every epoch)
         :param push_epoch:    epoch at which push_prototypes() fires (None = never)
         :param patience:      early-stopping patience in epochs on val accuracy
+        :param checkpoint_path: if not None, path to save the best model checkpoint
         """
         history: dict[str, list] = {
             "train_loss": [], "train_acc": [],
             "val_loss": [],   "val_acc": [],
             "val_epochs": [],
+            # step-level series (populated only when log_every > 0):
+            #   step_x     — fractional epoch (e.g. 1.33 = epoch 1, 33% through)
+            #   step_loss  — running-average total loss at that step
+            "step_x": [], "step_loss": [],
         }
 
         best_val_acc = 0.0
@@ -73,11 +82,15 @@ class Trainer:
         for epoch in range(1, epochs + 1):
             print(f"\nEpoch {epoch}/{epochs}")
 
-            # training step
-            train_metrics = self._train_epoch(train_loader)
+            self._step_log: list[tuple[float, float]] = []
+            train_metrics = self._train_epoch(train_loader, epoch=epoch)
             history["train_loss"].append(train_metrics.pop("total"))
             history["train_acc"].append(train_metrics.pop("acc"))
-            for k, v in train_metrics.items():       # extra loss components
+            if self._step_log:
+                xs, losses = zip(*self._step_log)
+                history["step_x"].extend(xs)
+                history["step_loss"].extend(losses)
+            for k, v in train_metrics.items(): # extra loss components
                 history.setdefault(k, []).append(v)
 
             # prototype push step
@@ -92,17 +105,26 @@ class Trainer:
                 history["val_acc"].append(val_metrics["acc"])
                 history["val_epochs"].append(epoch)
 
+                base_keys = {"train_loss", "train_acc", "val_loss", "val_acc", "val_epochs", "step_x", "step_loss"}
+                extra = "  ".join(
+                    f"{k}={v[-1]:.4f}"
+                    for k, v in history.items()
+                    if k not in base_keys and v
+                )
                 print(
-                    f"  train_loss={history['train_loss'][-1]:.4f} "
-                    f"train_acc={history['train_acc'][-1]:.4f} "
-                    f"val_loss={val_metrics['loss']:.4f} "
-                    f"val_acc={val_metrics['acc']:.4f}"
+                    f"train_loss={history['train_loss'][-1]:.4f}\n"
+                    f"train_acc={history['train_acc'][-1]:.4f}\n"
+                    f"val_loss={val_metrics['loss']:.4f}\n"
+                    f"val_acc={val_metrics['acc']:.4f}\n"
+                    + (f"[{extra}]" if extra else "")
                 )
 
-                # early stopping on validation accuracy
+                # early stopping + best-model checkpoint
                 if val_metrics["acc"] > best_val_acc:
                     best_val_acc = val_metrics["acc"]
                     epochs_no_improve = 0
+                    if checkpoint_path is not None:
+                        self.save_checkpoint(checkpoint_path, epoch, history)
                 else:
                     epochs_no_improve += val_every
                     if epochs_no_improve >= patience:
@@ -115,15 +137,16 @@ class Trainer:
         return history
 
 
-    def _train_epoch(self, loader) -> dict:
+    def _train_epoch(self, loader, epoch: int = 0) -> dict:
         """Runs one training epoch. Returns a metrics dict."""
         self.model.train()
 
         running: dict[str, float] = {}
         correct = 0
         total = 0
+        n_batches = len(loader)
 
-        for batch in tqdm(loader, desc="  train", leave=False):
+        for i, batch in enumerate(tqdm(loader, desc="  train", leave=False)):
             images, labels = batch
             images, labels = images.to(self.device), labels.to(self.device)
 
@@ -132,7 +155,6 @@ class Trainer:
             step["total"].backward()
             self.optimizer.step()
 
-            # accumulate loss components
             for k, v in step.items():
                 if k == "logits":
                     continue
@@ -143,8 +165,12 @@ class Trainer:
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
 
-        n = len(loader)
-        metrics = {k: v / n for k, v in running.items()}
+            if self.log_every > 0 and (i + 1) % self.log_every == 0:
+                step_x = epoch + (i + 1) / n_batches
+                step_loss = running.get("total", 0.0) / (i + 1)
+                self._step_log.append((step_x, step_loss))
+
+        metrics = {k: v / n_batches for k, v in running.items()}
         metrics["acc"] = correct / total
         return metrics
 
@@ -166,16 +192,25 @@ class Trainer:
 
         return {"loss": total_loss / len(loader), "acc": correct / total}
 
-    ##  Overridable hooks ##
+    # Overridable hooks
     def training_step(self, images: torch.Tensor, labels: torch.Tensor) -> dict:
         """
-        Default step: forward pass + cross-entropy loss.
-        Returns {"total": Tensor, "cls": Tensor, "logits": Tensor}.
+        Default step: forward pass + loss computation.
+        Returns at minimum {"total": Tensor, "cls": Tensor, "logits": Tensor}.
 
-        Prototype-method trainers override this to call model.compute_loss()
-        and return the full dict of loss components for separate logging.
+        For PrototypeModel subclasses, calls model.compute_loss() automatically
+        so per-component loss terms (ortho, sep, cluster, …) are logged separately.
+        Intermediate tensors needed by compute_loss (e.g. backbone features) are
+        cached on the model during forward() — no second backbone pass required.
+
+        Override this only if you need phased optimization (e.g. ProtoPNet's
+        3-phase training where backbone is frozen for the first N epochs).
         """
         logits = self.model(images)
+        if isinstance(self.model, PrototypeModel):
+            losses = self.model.compute_loss(logits, labels)
+            losses["logits"] = logits
+            return losses
         loss = self.loss_fn(logits, labels)
         return {"total": loss, "cls": loss, "logits": logits}
 
@@ -198,7 +233,7 @@ class Trainer:
             },
             path,
         )
-        print(f"  Checkpoint saved → {path}")
+        print(f"Checkpoint saved to {path}")
 
     def load_checkpoint(self, path: str) -> dict:
         """Loads full training state. Returns the saved history dict."""

@@ -46,7 +46,7 @@ class BaseModel(nn.Module, ABC):
     def explain(self, x: torch.Tensor) -> dict:
         """
         Returns a method-specific explanation dict for a single batch.
-        See docs/prototype_methods.md for the expected keys per method.
+        See docs/PROTOTYPE_METHODS_DETAILS.md for the expected keys per method.
         """
 
 

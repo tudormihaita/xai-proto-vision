@@ -58,8 +58,9 @@ xai-proto-vision/
 │       ├── tesnet.py            ← Member A: TesNet implementation
 │       └── pipnet.py            ← Member D: PIPNet implementation
 │
-├── train.py                     ← unified entry point
-│   # python train.py --method protopnet --dataset cub200 --epochs 100
+├── scripts/
+│   └── train.py                 ← unified entry point
+│   # python scripts/train.py --method protopnet --dataset cub200 --epochs 100
 │
 ├── experiments/
 │   ├── baseline.sh
@@ -144,6 +145,8 @@ uv pip install -e .
 
 ### 5. Download CUB-200-2011
 
+Dataset available from Caltech: https://data.caltech.edu/records/65de6-vp158
+
 ```bash
 # Download from the official source (also available on Kaggle)
 wget https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz
@@ -163,6 +166,26 @@ data/
         └── classes.txt
 ```
 
+### 6. Download Stanford Cars (required for full experiments)
+
+The official Stanford release does not include test labels. Download the additional file `cars_test_annos_withlabels.mat` from
+https://github.com/jhpohovey/StanfordCars-Dataset/tree/main/stanford_cars.
+
+Rest of the dataset is available on Kaggle: https://www.kaggle.com/datasets/eduardo4jesus/stanford-cars-dataset
+
+Expected layout matching `STANFORD_CARS_ROOT` in `src/constants.py`:
+
+```
+data/
+└── stanford_cars/
+    ├── cars_train/cars_train         ← 8,144 training images
+    ├── cars_test/cars_test           ← 8,041 test images
+    └── car_devkit/devkit
+        ├── cars_train_annos.mat
+        ├── cars_test_annos_withlabels.mat
+        └── cars_meta.mat
+```
+
 ---
 
 ## Usage
@@ -171,19 +194,19 @@ data/
 
 ```bash
 # Baseline (backbone + FC head)
-python train.py --method baseline --dataset cub200 --epochs 100
+python scripts/run_train.py --method baseline --dataset cub200 --epochs 100
 
 # ProtoPNet
-python train.py --method protopnet --dataset cub200 --epochs 100 --num-prototypes 10
+python scripts/run_train.py --method protopnet --dataset cub200 --epochs 100 --num-prototypes 10
 
 # ProtoTree
-python train.py --method prototree --dataset cub200 --epochs 100 --depth 6
+python scripts/run_train.py --method prototree --dataset cub200 --epochs 100 --depth 6
 
 # TesNet
-python train.py --method tesnet --dataset cub200 --epochs 100 --num-concepts 32
+python scripts/run_train.py --method tesnet --dataset cub200 --epochs 100 --num-concepts 32
 
 # PIPNet
-python train.py --method pipnet --dataset cub200 --epochs 100 --sparsity-threshold 0.1
+python scripts/run_train.py --method pipnet --dataset cub200 --epochs 100 --sparsity-threshold 0.1
 ```
 
 ### Running experiment sweeps
@@ -320,19 +343,45 @@ Each member is responsible for the following tasks on top of their prototype met
 
 ## Recommended Hyperparameter Sweeps
 
-Each method **must** be trained and evaluated across the hyperparameter values
-below — not just with a single default configuration. The sweep results are a
-required deliverable for Phase 3 and feed directly into the report's results
-and discussion sections. Report accuracy and enriched metrics for every value
-tested, not only the best-performing one, so the sensitivity of each method
-is visible.
+Each method **must** be trained and evaluated across the combinations below.
+Report accuracy and enriched metrics for every run — not only the best —
+so the sensitivity of each method is visible in the results section.
 
-| Method | Parameter | Values to try |
-|---|---|---|
-| ProtoPNet | Prototypes per class | 5, 10, 20, 50 |
-| ProtoTree | Tree depth | 4, 6, 8 |
-| TesNet | Number of concepts | 16, 32, 64 |
-| PIPNet | Sparsity threshold | 0.05, 0.1, 0.2 |
+All parameters not listed in a sweep are held at their defaults
+(`--backbone resnet34`, `--lr 1e-3`, `--weight-decay 1e-4`, `--scheduler cosine`).
+
+### Step 1 — Primary sweep (method-specific parameter, CUB-200)
+
+Fix the dataset to CUB-200 and sweep the parameter that defines the method's
+interpretability capacity. This is the main result table in the report.
+
+| Method | CLI flag | Values | Example command |
+|---|---|---|---|
+| Baseline | `--backbone` | `resnet34`, `vgg16` | `python scripts/run_train.py --method baseline --backbone resnet34 --dataset cub200 --epochs 100` |
+| ProtoPNet | `--num-prototypes` | `5`, `10`, `20`, `50` | `python scripts/run_train.py --method protopnet --num-prototypes 10 --dataset cub200 --epochs 100` |
+| ProtoTree | `--depth` | `4`, `6`, `8` | `python scripts/run_train.py --method prototree --depth 6 --dataset cub200 --epochs 100` |
+| TesNet | `--num-concepts` | `16`, `32`, `64` | `python scripts/run_train.py --method tesnet --num-concepts 32 --dataset cub200 --epochs 100` |
+| PIPNet | `--sparsity-threshold` | `0.05`, `0.1`, `0.2` | `python scripts/run_train.py --method pipnet --sparsity-threshold 0.1 --dataset cub200 --epochs 100` |
+
+### Step 2 — Cross-dataset validation (Stanford Cars)
+
+Take the best configuration from Step 1 and retrain on Stanford Cars.
+Demonstrates whether results generalise beyond CUB-200.
+
+```bash
+# Example for TesNet with best config (num-concepts 32)
+python scripts/run_train.py --method tesnet --num-concepts 32 --dataset stanford_cars --epochs 100
+```
+
+### Step 3 — Backbone comparison (optional)
+
+With the best method-specific hyperparameter fixed, swap the backbone to
+compare ResNet-34 vs VGG-16. Both produce `(B, 512, 7, 7)` feature maps
+for 224×224 input so no model changes are required.
+
+```bash
+python scripts/run_train.py --method tesnet --num-concepts 32 --backbone vgg16 --dataset cub200 --epochs 100
+```
 
 ---
 

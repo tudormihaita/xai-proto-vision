@@ -1,0 +1,245 @@
+"""
+Unified training entry point for all prototype-based methods.
+
+Usage examples
+--------------
+python run_train.py --method baseline  --epochs 100
+python run_train.py --method tesnet    --epochs 100 --num-concepts 32
+python run_train.py --method protopnet --epochs 100 --num-prototypes 10 --push-epoch 80
+python run_train.py --method prototree --epochs 100 --depth 6             --push-epoch 80
+python run_train.py --method pipnet    --epochs 100 --sparsity-threshold 0.1
+
+Adding a new method
+-------------------
+1. Implement src/models/<method>.py (subclass PrototypeModel).
+2. Change the branch in build_model() below with correct configuration, and add any method-specific hyperparameters to parse_args().
+3. The shared Trainer handles training automatically — no Trainer subclass needed
+   unless the method requires phased optimization (e.g. ProtoPNet 3-phase training).
+"""
+
+import argparse
+import csv
+import json
+import time
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+from src.constants import CHECKPOINTS_ROOT, RESULTS_ROOT
+from src.data import load_dataset
+from src.evaluate import evaluate_model, print_results
+from src.trainer import Trainer
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Train a prototype-based model on CUB-200")
+
+    p.add_argument("--method",   required=True,
+                   choices=["baseline", "tesnet", "protopnet", "prototree", "pipnet"])
+    p.add_argument("--backbone", default="resnet34", choices=["resnet34", "vgg16"])
+    p.add_argument("--dataset",  default="cub200", choices=["cub200", "stanford_cars"])
+    p.add_argument("--epochs",   type=int,   default=100)
+    p.add_argument("--batch-size", dest="batch_size", type=int, default=64)
+    p.add_argument("--lr",           type=float, default=1e-3)
+    p.add_argument("--weight-decay", dest="weight_decay", type=float, default=1e-4)
+    p.add_argument("--scheduler",    default="cosine", choices=["none", "cosine", "step"])
+    p.add_argument("--device",   default=(
+        "cuda" if torch.cuda.is_available() else
+        "mps"  if torch.backends.mps.is_available() else "cpu"
+    ))
+    p.add_argument("--workers",  type=int,   default=4)
+    p.add_argument("--patience",   type=int, default=15)
+    p.add_argument("--val-every",  dest="val_every",  type=int, default=1)
+    p.add_argument("--log-every",  dest="log_every",  type=int, default=0,
+                   help="log intra-epoch loss every N batches for smoother curves (0 = epoch-level only)")
+
+    # method-specific hyperparameters
+    p.add_argument("--num-concepts",       dest="num_concepts",       type=int,   default=32)
+    p.add_argument("--num-prototypes",     dest="num_prototypes",     type=int,   default=10)
+    p.add_argument("--depth",              type=int,                              default=6)
+    p.add_argument("--sparsity-threshold", dest="sparsity_threshold", type=float, default=0.1)
+    p.add_argument("--push-epoch",         dest="push_epoch",         type=int,   default=None)
+    p.add_argument("--lambda-ortho",       dest="lambda_ortho",       type=float, default=1e-3)
+    p.add_argument("--lambda-sep",         dest="lambda_sep",         type=float, default=8e-4)
+
+    return p.parse_args()
+
+
+NUM_CLASSES = {"cub200": 200, "stanford_cars": 196}
+
+
+def build_model(args) -> nn.Module:
+    num_classes = NUM_CLASSES[args.dataset]
+
+    if args.method == "baseline":
+        from src.models import BaselineModel
+        return BaselineModel(backbone_name=args.backbone, num_classes=num_classes)
+
+    if args.method == "tesnet":
+        from src.models.tesnet import TesNet
+        return TesNet(
+            backbone_name=args.backbone,
+            num_classes=num_classes,
+            num_concepts=args.num_concepts,
+            lambda_ortho=args.lambda_ortho,
+            lambda_sep=args.lambda_sep,
+        )
+
+    if args.method == "protopnet":
+        from src.models.protopnet import ProtoPNet
+        return ProtoPNet(backbone_name=args.backbone, num_classes=num_classes,
+                         num_prototypes_per_class=args.num_prototypes)
+
+    if args.method == "prototree":
+        from src.models.prototree import ProtoTree
+        return ProtoTree(backbone_name=args.backbone, num_classes=num_classes, depth=args.depth)
+
+    if args.method == "pipnet":
+        from src.models.pipnet import PIPNet
+        return PIPNet(backbone_name=args.backbone, num_classes=num_classes,
+                      sparsity_threshold=args.sparsity_threshold)
+
+    raise NotImplementedError(f"Method '{args.method}' not yet implemented")
+
+
+def build_optimizer(args, model: nn.Module) -> torch.optim.Optimizer:
+    from src.models import PrototypeModel
+    wd = args.weight_decay
+    if isinstance(model, PrototypeModel):
+        return torch.optim.Adam([
+            {"params": model.get_backbone_params(),  "lr": args.lr * 0.1, "weight_decay": wd},
+            {"params": model.get_prototype_params(), "lr": args.lr,        "weight_decay": wd},
+        ])
+    return torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd)
+
+
+def build_scheduler(args, optimizer, num_epochs: int):
+    if args.scheduler == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    if args.scheduler == "step":
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=num_epochs // 3, gamma=0.1)
+    return None
+
+
+def build_trainer(args, model: nn.Module) -> Trainer:
+    """
+    Builds the optimizer, scheduler and Trainer for the given method.
+
+    Add a branch here if required when a method needs a custom Trainer subclass
+    (e.g. ProtoPNet's 3-phase training that freezes/unfreezes the backbone
+    at specific epochs — that requires overriding training_step).
+    All other methods use the base Trainer unchanged.
+    """
+    optimizer = build_optimizer(args, model)
+    scheduler = build_scheduler(args, optimizer, args.epochs)
+
+    # ProtoPNet: replace with ProtoPNetTrainer once implemented by Member B
+    # if args.method == "protopnet":
+    #     from src.models.protopnet import ProtoPNetTrainer
+    #     return ProtoPNetTrainer(model, optimizer, nn.CrossEntropyLoss(), args.device, scheduler)
+
+    return Trainer(model, optimizer, nn.CrossEntropyLoss(), args.device,
+                   scheduler=scheduler, log_every=args.log_every)
+
+
+def generate_training_run_tag(args) -> str:
+    # format: <method>_<dataset>_<backbone>_<key-hyperparam>
+    # e.g. tesnet_cub200_resnet34_k32
+    ds  = args.dataset
+    bb  = args.backbone
+    if args.method == "tesnet":
+        return f"tesnet_{ds}_{bb}_k{args.num_concepts}"
+    if args.method == "protopnet":
+        return f"protopnet_{ds}_{bb}_p{args.num_prototypes}"
+    if args.method == "prototree":
+        return f"prototree_{ds}_{bb}_d{args.depth}"
+    if args.method == "pipnet":
+        return f"pipnet_{ds}_{bb}_s{str(args.sparsity_threshold).replace('.', '')}"
+    return f"baseline_{ds}_{bb}"
+
+
+def main() -> None:
+    args = parse_args()
+    run_tag = generate_training_run_tag(args)
+
+    # Load data
+    loader_kwargs = dict(batch_size=args.batch_size, num_workers=args.workers, pin_memory=True)
+    train_loader = DataLoader(load_dataset(args.dataset, "train"), shuffle=True,  **loader_kwargs)
+    val_loader   = DataLoader(load_dataset(args.dataset, "val"),   shuffle=False, **loader_kwargs)
+    test_loader  = DataLoader(load_dataset(args.dataset, "test"),  shuffle=False, **loader_kwargs)
+
+    # Initialize model and trainer
+    model = build_model(args)
+    model.to(args.device)
+
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\nMethod: {args.method}  |  Run: {run_tag}  |  Device: {args.device}  |  Trainable params: {num_params:,}\n")
+
+    trainer = build_trainer(args, model)
+
+    # Training loop — checkpoints saved under checkpoints/<method>/
+    method_ckpt_dir = CHECKPOINTS_ROOT / args.method
+    method_ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = str(method_ckpt_dir / f"{run_tag}_best.pt")
+
+    # Save hyperparams alongside checkpoint so trained model can be loaded for inference usage
+    config = vars(args)
+    with open(method_ckpt_dir / f"{run_tag}_config.json", "w") as f:
+        json.dump(config, f, indent=2)
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(args.device)
+
+    t0 = time.time()
+    trainer.train(
+        train_loader, val_loader,
+        epochs=args.epochs,
+        val_every=args.val_every,
+        push_epoch=args.push_epoch,
+        patience=args.patience,
+        checkpoint_path=ckpt_path,
+    )
+    train_minutes = (time.time() - t0) / 60
+    print(f"\nTraining complete in {train_minutes:.1f} min; Best checkpoint: {ckpt_path}")
+
+    # Load best weights for evaluation
+    trainer.load_checkpoint(ckpt_path)
+
+    # Evaluate on test split
+    results = evaluate_model(model, test_loader, args.device)
+    per_class = results.pop("per_class_accuracy")   # numpy array -> save stats, not raw array
+    results["per_class_acc_mean"] = float(per_class.mean())
+    results["per_class_acc_std"]  = float(per_class.std())
+    results["method"]             = args.method
+    results["run_tag"]            = run_tag
+    results["training_time_min"]  = round(train_minutes, 2)
+    results["peak_gpu_memory_mb"] = (
+        torch.cuda.max_memory_allocated(args.device) / 1024 ** 2
+        if torch.cuda.is_available() else 0.0
+    )
+    results["num_params"]         = num_params
+    results["num_concepts"]       = getattr(model, "num_concepts", None) or getattr(model, "num_prototypes", None)
+
+    print_results(results, model_name=run_tag)
+
+    # Save per-run results CSV
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    csv_path = RESULTS_ROOT / f"{run_tag}_results.csv"
+    fields = [
+        "method", "run_tag", "accuracy", "topk_accuracy",
+        "per_class_acc_mean", "per_class_acc_std",
+        "training_time_min", "peak_gpu_memory_mb",
+        "num_params", "num_concepts", "inference_time_ms", "flops",
+    ]
+    write_header = not csv_path.exists()
+    with csv_path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(results)
+    print(f"Results saved to {csv_path}")
+
+
+if __name__ == "__main__":
+    main()
