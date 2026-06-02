@@ -4,7 +4,7 @@ Unified training entry point for all prototype-based methods.
 Usage examples
 --------------
 python run_train.py --method baseline  --epochs 100
-python run_train.py --method tesnet    --epochs 100 --num-concepts 32
+python run_train.py --method tesnet    --epochs 50  --num-concepts 10 --warm-epochs 5 --scheduler step
 python run_train.py --method protopnet --epochs 100 --num-prototypes 10 --push-epoch 80
 python run_train.py --method prototree --epochs 100 --depth 6             --push-epoch 80
 python run_train.py --method pipnet    --epochs 100 --sparsity-threshold 0.1
@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr",           type=float, default=1e-3)
     p.add_argument("--weight-decay", dest="weight_decay", type=float, default=1e-4)
     p.add_argument("--scheduler",    default="cosine", choices=["none", "cosine", "step"])
+    p.add_argument("--step-size",    dest="step_size",  type=int, default=None,
+                   help="StepLR step size (only used when --scheduler step). Default: epochs // 3.")
     p.add_argument("--device",   default=(
         "cuda" if torch.cuda.is_available() else
         "mps"  if torch.backends.mps.is_available() else "cpu"
@@ -51,17 +53,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--workers",  type=int,   default=4)
     p.add_argument("--patience",   type=int, default=15)
     p.add_argument("--val-every",  dest="val_every",  type=int, default=1)
-    p.add_argument("--log-every",  dest="log_every",  type=int, default=0,
+    p.add_argument("--log-every",   dest="log_every",   type=int, default=0,
                    help="log intra-epoch loss every N batches for smoother curves (0 = epoch-level only)")
+    p.add_argument("--eval-only", dest="eval_only", action="store_true", default=False,
+                   help="skip training and load the existing checkpoint for test evaluation only")
+    p.add_argument("--warm-epochs",   dest="warm_epochs",   type=int,  default=0,
+                   help="freeze backbone for first N epochs; paper value for TesNet: 5")
+    p.add_argument("--use-bbox-crop", dest="use_bbox_crop", action="store_true", default=False,
+                   help="crop images to bounding-box annotation before backbone (recommended for TesNet)")
 
     # method-specific hyperparameters
-    p.add_argument("--num-concepts",       dest="num_concepts",       type=int,   default=32)
+    p.add_argument("--num-concepts",       dest="num_concepts",       type=int,   default=10,
+                   help="TesNet: concepts PER CLASS (total = this × num_classes). Paper value: 10. Sweep: 5, 10, 20")
+    p.add_argument("--concept-dim",        dest="concept_dim",        type=int,   default=64,
+                   help="TesNet: bottleneck concept dimension (paper value: 64)")
     p.add_argument("--num-prototypes",     dest="num_prototypes",     type=int,   default=10)
     p.add_argument("--depth",              type=int,                              default=6)
     p.add_argument("--sparsity-threshold", dest="sparsity_threshold", type=float, default=0.1)
     p.add_argument("--push-epoch",         dest="push_epoch",         type=int,   default=None)
-    p.add_argument("--lambda-ortho",       dest="lambda_ortho",       type=float, default=1e-3)
-    p.add_argument("--lambda-sep",         dest="lambda_sep",         type=float, default=8e-4)
+    p.add_argument("--lambda-ortho",       dest="lambda_ortho",       type=float, default=1e-4,
+                   help="TesNet: within-class orthogonality weight (paper value: 1e-4)")
+    p.add_argument("--lambda-clst",        dest="lambda_clst",        type=float, default=0.8,
+                   help="TesNet: cluster loss — pull features toward same-class concepts (paper value: 0.8)")
+    p.add_argument("--lambda-sep",         dest="lambda_sep",         type=float, default=0.08,
+                   help="TesNet: separation loss — push features from other-class concepts (paper value: 0.08)")
+    p.add_argument("--lambda-l1",          dest="lambda_l1",          type=float, default=1e-4,
+                   help="TesNet: L1 sparsity on classifier weights (paper value: 1e-4)")
 
     return p.parse_args()
 
@@ -81,9 +98,12 @@ def build_model(args) -> nn.Module:
         return TesNet(
             backbone_name=args.backbone,
             num_classes=num_classes,
-            num_concepts=args.num_concepts,
-            lambda_ortho=args.lambda_ortho,
+            num_concepts_per_class=args.num_concepts,
+            concept_dim=args.concept_dim,
+            lambda_clst=args.lambda_clst,
             lambda_sep=args.lambda_sep,
+            lambda_ortho=args.lambda_ortho,
+            lambda_l1=args.lambda_l1,
         )
 
     if args.method == "protopnet":
@@ -105,12 +125,24 @@ def build_model(args) -> nn.Module:
 
 def build_optimizer(args, model: nn.Module) -> torch.optim.Optimizer:
     from src.models import PrototypeModel
+    from src.models.tesnet import TesNet
     wd = args.weight_decay
+
+    if isinstance(model, TesNet):
+        # Three-group optimizer matching paper: backbone 1e-4, add_on+concepts 3e-3, classifier 1e-4
+        return torch.optim.Adam([
+            {"params": model.backbone.parameters(),        "lr": 1e-4,  "weight_decay": 1e-3},
+            {"params": list(model.add_on_layers.parameters()) + [model.concept_vectors],
+                                                           "lr": 3e-3,  "weight_decay": 1e-3},
+            {"params": model.classifier.parameters(),      "lr": 1e-4,  "weight_decay": wd},
+        ])
+
     if isinstance(model, PrototypeModel):
         return torch.optim.Adam([
             {"params": model.get_backbone_params(),  "lr": args.lr * 0.1, "weight_decay": wd},
             {"params": model.get_prototype_params(), "lr": args.lr,        "weight_decay": wd},
         ])
+
     return torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=wd)
 
 
@@ -118,7 +150,8 @@ def build_scheduler(args, optimizer, num_epochs: int):
     if args.scheduler == "cosine":
         return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     if args.scheduler == "step":
-        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=num_epochs // 3, gamma=0.1)
+        step_size = args.step_size if args.step_size is not None else max(1, num_epochs // 3)
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.1)
     return None
 
 
@@ -140,7 +173,8 @@ def build_trainer(args, model: nn.Module) -> Trainer:
     #     return ProtoPNetTrainer(model, optimizer, nn.CrossEntropyLoss(), args.device, scheduler)
 
     return Trainer(model, optimizer, nn.CrossEntropyLoss(), args.device,
-                   scheduler=scheduler, log_every=args.log_every)
+                   scheduler=scheduler, log_every=args.log_every,
+                   warm_epochs=args.warm_epochs)
 
 
 def generate_training_run_tag(args) -> str:
@@ -149,7 +183,8 @@ def generate_training_run_tag(args) -> str:
     ds  = args.dataset
     bb  = args.backbone
     if args.method == "tesnet":
-        return f"tesnet_{ds}_{bb}_k{args.num_concepts}"
+        dim_suffix = f"_d{args.concept_dim}" if args.concept_dim != 64 else ""
+        return f"tesnet_{ds}_{bb}_k{args.num_concepts}{dim_suffix}"
     if args.method == "protopnet":
         return f"protopnet_{ds}_{bb}_p{args.num_prototypes}"
     if args.method == "prototree":
@@ -164,10 +199,11 @@ def main() -> None:
     run_tag = generate_training_run_tag(args)
 
     # Load data
-    loader_kwargs = dict(batch_size=args.batch_size, num_workers=args.workers, pin_memory=True)
-    train_loader = DataLoader(load_dataset(args.dataset, "train"), shuffle=True,  **loader_kwargs)
-    val_loader   = DataLoader(load_dataset(args.dataset, "val"),   shuffle=False, **loader_kwargs)
-    test_loader  = DataLoader(load_dataset(args.dataset, "test"),  shuffle=False, **loader_kwargs)
+    loader_kwargs  = dict(batch_size=args.batch_size, num_workers=args.workers, pin_memory=True)
+    dataset_kwargs = dict(use_bbox_crop=args.use_bbox_crop)
+    train_loader = DataLoader(load_dataset(args.dataset, "train", **dataset_kwargs), shuffle=True,  **loader_kwargs)
+    val_loader   = DataLoader(load_dataset(args.dataset, "val",   **dataset_kwargs), shuffle=False, **loader_kwargs)
+    test_loader  = DataLoader(load_dataset(args.dataset, "test",  **dataset_kwargs), shuffle=False, **loader_kwargs)
 
     # Initialize model and trainer
     model = build_model(args)
@@ -188,20 +224,24 @@ def main() -> None:
     with open(method_ckpt_dir / f"{run_tag}_config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats(args.device)
+    if args.eval_only:
+        print(f"Eval-only mode; loading checkpoint: {ckpt_path}")
+        train_minutes = 0.0
+    else:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(args.device)
 
-    t0 = time.time()
-    trainer.train(
-        train_loader, val_loader,
-        epochs=args.epochs,
-        val_every=args.val_every,
-        push_epoch=args.push_epoch,
-        patience=args.patience,
-        checkpoint_path=ckpt_path,
-    )
-    train_minutes = (time.time() - t0) / 60
-    print(f"\nTraining complete in {train_minutes:.1f} min; Best checkpoint: {ckpt_path}")
+        t0 = time.time()
+        trainer.train(
+            train_loader, val_loader,
+            epochs=args.epochs,
+            val_every=args.val_every,
+            push_epoch=args.push_epoch,
+            patience=args.patience,
+            checkpoint_path=ckpt_path,
+        )
+        train_minutes = (time.time() - t0) / 60
+        print(f"\nTraining complete in {train_minutes:.1f} min; Best checkpoint: {ckpt_path}")
 
     # Load best weights for evaluation
     trainer.load_checkpoint(ckpt_path)

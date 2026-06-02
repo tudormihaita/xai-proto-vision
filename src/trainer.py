@@ -28,13 +28,15 @@ class Trainer:
         device: str | torch.device,
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         log_every: int = 0,
+        warm_epochs: int = 0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.device = device
         self.scheduler = scheduler
-        self.log_every = log_every  # log intra-epoch every N batches; 0 = epoch-level only
+        self.log_every = log_every    # log intra-epoch every N batches; 0 = epoch-level only
+        self.warm_epochs = warm_epochs  # freeze backbone for first N epochs (0 = disabled)
         self._step_log: list[tuple[float, float]] = []
 
 
@@ -143,6 +145,14 @@ class Trainer:
 
     def _train_epoch(self, loader, epoch: int = 0) -> dict:
         """Runs one training epoch. Returns a metrics dict."""
+        if self.warm_epochs > 0 and hasattr(self.model, "freeze_backbone"):
+            if epoch == 1:
+                self.model.freeze_backbone()
+                print("Warm phase: backbone frozen")
+            elif epoch == self.warm_epochs + 1:
+                self.model.unfreeze_backbone()
+                print("Joint phase: backbone unfrozen")
+
         self.model.train()
 
         running: dict[str, float] = {}

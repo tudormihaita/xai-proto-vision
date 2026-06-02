@@ -49,6 +49,14 @@ class BaseModel(nn.Module, ABC):
         See docs/PROTOTYPE_METHODS_DETAILS.md for the expected keys per method.
         """
 
+    def freeze_backbone(self) -> None:
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+    def unfreeze_backbone(self) -> None:
+        for p in self.backbone.parameters():
+            p.requires_grad = True
+
 
 class BaselineModel(BaseModel):
     """
