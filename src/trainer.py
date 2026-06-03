@@ -99,6 +99,9 @@ class Trainer:
                 if isinstance(self.model, PrototypeModel):
                     print("Pushing prototypes...")
                     self.model.push_prototypes(train_loader, self.device)
+                    # Optional: model-specific post-push initialization
+                    if hasattr(self.model, "post_push_init"):
+                        self.model.post_push_init()
                 else:
                     print(f"Warning: --push-epoch set but {type(self.model).__name__} is not a PrototypeModel")
 
