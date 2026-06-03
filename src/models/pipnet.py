@@ -140,6 +140,19 @@ def build_backbone(
 
         out_channels = 2048
 
+    elif backbone_name == "vgg16":
+
+        weights = (
+            models.VGG16_Weights.IMAGENET1K_V1
+            if pretrained else None
+        )
+
+        model = models.vgg16(weights=weights)
+
+        features = model.features
+
+        out_channels = 512
+
     elif backbone_name == "convnext_tiny":
 
         weights = (
@@ -184,29 +197,34 @@ class PIPNet(PrototypeModel):
     def __init__(
         self,
         num_classes: int,
-        backbone: str = "resnet50",
+        backbone_name: str = "resnet50",
         pretrained: bool = True,
         num_prototypes: int = 256,
         prototype_dim: int = 512,
         image_size: int = 224,
         classifier_bias: bool = False,
         init_scale: float = 0.1,
+        sparsity_threshold: float = 1e-3,
     ):
-        super().__init__()
+        # ====================================================
+        # Backbone (build before super().__init__)
+        # ====================================================
 
-        self.num_classes = num_classes
+        feature_extractor, backbone_channels = build_backbone(
+            backbone_name=backbone_name,
+            pretrained=pretrained,
+        )
+
+        # Call parent __init__ with backbone and num_classes
+        super().__init__(backbone=feature_extractor, num_classes=num_classes)
+
         self.num_prototypes = num_prototypes
         self.prototype_dim = prototype_dim
         self.image_size = image_size
+        self.sparsity_threshold = sparsity_threshold
 
-        # ====================================================
-        # Backbone
-        # ====================================================
-
-        self.feature_extractor, backbone_channels = build_backbone(
-            backbone_name=backbone,
-            pretrained=pretrained,
-        )
+        # Alias for compatibility
+        self.feature_extractor = self.backbone
 
         # ====================================================
         # Projection Layer
@@ -343,52 +361,51 @@ class PIPNet(PrototypeModel):
     def forward(
         self,
         x: torch.Tensor,
-        return_maps: bool = False,
-    ) -> Dict[str, torch.Tensor]:
-
-        # ---------------------------------------------
+    ) -> torch.Tensor:
+        """
+        Forward pass returning logits (B, num_classes).
+        Implements the abstract method from BaseModel.
+        """
         # Feature maps
-        # ---------------------------------------------
-
         features = self.extract_features(x)
 
-        # ---------------------------------------------
         # Prototype similarities
-        # ---------------------------------------------
+        similarities = self.compute_similarities(features)
 
-        similarities = self.compute_similarities(
-            features
-        )
-
-        # ---------------------------------------------
         # Global max pooling over spatial locations
-        # ---------------------------------------------
+        prototype_scores, _ = self.global_max_pool(similarities)
 
-        prototype_scores, max_indices = self.global_max_pool(
-            similarities
-        )
-
-        # ---------------------------------------------
         # Classification
-        # ---------------------------------------------
+        logits = self.classifier(prototype_scores)
 
-        logits = self.classifier(
-            prototype_scores
-        )
+        return logits
 
-        output = {
+    def forward_with_details(
+        self,
+        x: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass returning detailed outputs for training/analysis.
+        """
+        # Feature maps
+        features = self.extract_features(x)
+
+        # Prototype similarities
+        similarities = self.compute_similarities(features)
+
+        # Global max pooling over spatial locations
+        prototype_scores, max_indices = self.global_max_pool(similarities)
+
+        # Classification
+        logits = self.classifier(prototype_scores)
+
+        return {
             "logits": logits,
             "prototype_scores": prototype_scores,
             "max_indices": max_indices,
+            "similarity_maps": similarities,
+            "features": features,
         }
-
-        if return_maps:
-            output.update({
-                "similarity_maps": similarities,
-                "features": features,
-            })
-
-        return output
 
     # ========================================================
     # Prediction
@@ -418,10 +435,7 @@ class PIPNet(PrototypeModel):
         k: int = 10,
     ):
 
-        outputs = self.forward(
-            x,
-            return_maps=True
-        )
+        outputs = self.forward_with_details(x)
 
         scores = outputs["prototype_scores"]
 
@@ -442,10 +456,7 @@ class PIPNet(PrototypeModel):
         x: torch.Tensor
     ) -> torch.Tensor:
 
-        outputs = self.forward(
-            x,
-            return_maps=True
-        )
+        outputs = self.forward_with_details(x)
 
         return outputs["similarity_maps"]
 
@@ -505,16 +516,20 @@ class PIPNet(PrototypeModel):
 
         return lambda_orth * loss
 
-    def loss(
+    def compute_loss(
         self,
-        outputs: Dict[str, torch.Tensor],
+        logits: torch.Tensor,
         labels: torch.Tensor,
+        features: Optional[torch.Tensor] = None,
         lambda_l1: float = 1e-4,
         lambda_orth: float = 1e-3,
     ) -> Dict[str, torch.Tensor]:
-
+        """
+        Computes total loss and individual loss components.
+        Implements the abstract method from PrototypeModel.
+        """
         cls_loss = self.classification_loss(
-            outputs["logits"],
+            logits,
             labels
         )
 
@@ -533,11 +548,40 @@ class PIPNet(PrototypeModel):
         )
 
         return {
-            "loss": total,
-            "classification_loss": cls_loss,
-            "sparsity_loss": sparse_loss,
-            "orthogonality_loss": orth_loss,
+            "total": total,
+            "cls": cls_loss,
+            "sparsity": sparse_loss,
+            "orthogonality": orth_loss,
         }
+
+    def loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        lambda_l1: float = 1e-4,
+        lambda_orth: float = 1e-3,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Legacy method for backward compatibility.
+        Delegates to compute_loss().
+        """
+        return self.compute_loss(
+            outputs["logits"],
+            labels,
+            lambda_l1=lambda_l1,
+            lambda_orth=lambda_orth,
+        )
+
+    # ========================================================
+    # Compatibility methods
+    # ========================================================
+
+    def push_prototypes(self, train_loader, device: str | torch.device) -> None:
+        """
+        Optional prototype anchoring (no-op for PIPNet).
+        Implements method from PrototypeModel.
+        """
+        pass
 
     # ========================================================
     # Prototype Utilities
@@ -620,6 +664,41 @@ class PIPNet(PrototypeModel):
         self.num_prototypes = len(keep_indices)
 
         return removed
+
+    # ========================================================
+    # Abstract Method Implementations
+    # ========================================================
+
+    def explain(
+        self,
+        x: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Returns explanation information for interpretability.
+        Implements the abstract method from BaseModel.
+        """
+        outputs = self.forward_with_details(x)
+        
+        return {
+            "logits": outputs["logits"],
+            "prototype_scores": outputs["prototype_scores"],
+            "similarity_maps": outputs["similarity_maps"],
+            "features": outputs["features"],
+        }
+
+    def get_backbone_params(self):
+        """
+        Returns backbone parameters for selective optimization.
+        Implements method from PrototypeModel.
+        """
+        return self.feature_extractor.parameters()
+
+    def get_prototype_params(self):
+        """
+        Returns prototype layer parameters for selective optimization.
+        Implements the abstract method from PrototypeModel.
+        """
+        return [self.prototype_vectors]
 
     # ========================================================
     # Freezing Utilities

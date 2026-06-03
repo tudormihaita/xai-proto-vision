@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--push-epoch",         dest="push_epoch",         type=int,   default=None)
     p.add_argument("--lambda-ortho",       dest="lambda_ortho",       type=float, default=1e-3)
     p.add_argument("--lambda-sep",         dest="lambda_sep",         type=float, default=8e-4)
+    p.add_argument("--lambda-cluster",     dest="lambda_cluster",     type=float, default=0.8)
 
     return p.parse_args()
 
@@ -93,7 +94,12 @@ def build_model(args) -> nn.Module:
 
     if args.method == "prototree":
         from src.models.prototree import ProtoTree
-        return ProtoTree(backbone_name=args.backbone, num_classes=num_classes, depth=args.depth)
+        return ProtoTree(
+            backbone_name=args.backbone,
+            num_classes=num_classes,
+            depth=args.depth,
+            lambda_cluster=args.lambda_cluster,
+        )
 
     if args.method == "pipnet":
         from src.models.pipnet import PIPNet
