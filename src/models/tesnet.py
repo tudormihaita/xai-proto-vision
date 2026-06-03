@@ -18,6 +18,7 @@ Loss (from settings_CUB.py / paper):
         + λ_clst  * cluster_loss          (pull features toward same-class concepts,    coef=0.8)
         − λ_sep   * sep_loss              (push features away from other-class concepts, coef=0.08)
         + λ_ortho * ||C_c C_c^T − I||²_F  (within-class orthogonality per class c,      coef=1e-4)
+        − λ_ss    * Σ ||P_c1 − P_c2||_F   (push class subspaces apart, Grassmann,       coef=1e-7)
         + λ_l1    * ||W_cls||_1            (sparsity on classifier weights,              coef=1e-4)
 """
 
@@ -62,6 +63,7 @@ class TesNet(PrototypeModel):
         lambda_clst: float = 0.8,
         lambda_sep: float = 0.08,
         lambda_ortho: float = 1e-4,
+        lambda_ss: float = 0.08,
         lambda_l1: float = 1e-4,
     ) -> None:
         backbone, feature_dim = build_backbone(backbone_name)
@@ -74,6 +76,7 @@ class TesNet(PrototypeModel):
         self.lambda_clst   = lambda_clst
         self.lambda_sep    = lambda_sep
         self.lambda_ortho  = lambda_ortho
+        self.lambda_ss     = lambda_ss
         self.lambda_l1     = lambda_l1
 
         # prototype_class_identity[k, c] = 1  iff concept k belongs to class c.
@@ -138,14 +141,14 @@ class TesNet(PrototypeModel):
 
     def _project(self, features: torch.Tensor) -> torch.Tensor:
         """Projection magnitude onto normalised concept basis → (B, num_concepts)."""
-        norm_cv = F.normalize(self.concept_vectors, p=2, dim=1)
+        norm_cv = F.normalize(self.concept_vectors, p=2, dim=1, eps=1e-8)
         proj    = F.conv2d(features, norm_cv)                    # (B, K, H, W)
         return F.adaptive_max_pool2d(proj, (1, 1)).flatten(1)   # (B, K)
 
     def _cosine_distances(self, features: torch.Tensor) -> torch.Tensor:
         """Cosine distance from every spatial location to each concept → (B, K, H, W)."""
-        feat_norm = F.normalize(features, p=2, dim=1)
-        conc_norm = F.normalize(self.concept_vectors, p=2, dim=1)
+        feat_norm = F.normalize(features, p=2, dim=1, eps=1e-8)
+        conc_norm = F.normalize(self.concept_vectors, p=2, dim=1, eps=1e-8)
         return -F.conv2d(feat_norm, conc_norm)   # negate similarity → distance
 
     def compute_loss(
@@ -156,7 +159,8 @@ class TesNet(PrototypeModel):
     ) -> dict[str, torch.Tensor]:
         cls_loss   = F.cross_entropy(logits, labels)
         ortho_loss = self._orthogonality_loss()
-        l1_loss    = self.classifier.weight.abs().mean()
+        ss_loss    = self._subspace_separation_loss()
+        l1_loss    = self._selective_l1_loss()
 
         feats = features if features is not None else getattr(self, "_last_features", None)
         if feats is not None:
@@ -170,6 +174,7 @@ class TesNet(PrototypeModel):
             + self.lambda_clst  * clst_loss
             - self.lambda_sep   * sep_loss    # negative: maximize distance to wrong-class concepts
             + self.lambda_ortho * ortho_loss
+            - self.lambda_ss    * ss_loss     # negative: maximize distance between class subspaces
             + self.lambda_l1    * l1_loss
         )
         return {
@@ -178,6 +183,7 @@ class TesNet(PrototypeModel):
             "clst":  clst_loss,
             "sep":   sep_loss,
             "ortho": ortho_loss,
+            "ss":    ss_loss,
         }
 
     def _cluster_sep_loss(
@@ -208,6 +214,43 @@ class TesNet(PrototypeModel):
         sep_loss  = min_per_concept.where(~same, large).min(dim=1).values.mean()
         return clst_loss, sep_loss
 
+    def _selective_l1_loss(self) -> torch.Tensor:
+        """
+        L1 penalty from paper Stage 2 (L_h): penalizes only cross-class classifier
+        weights (W[c, k] where concept k does NOT belong to class c).
+        Uniform L1 would fight the +1 same-class initialization; this does not.
+        """
+        cross_class = 1.0 - self.prototype_class_identity.T   # (num_classes, num_concepts)
+        return (self.classifier.weight.abs() * cross_class).sum() / cross_class.sum()
+
+    def _subspace_separation_loss(self) -> torch.Tensor:
+        """
+        Pushes every pair of class subspaces apart on the Grassmann manifold.
+        Each class spans a k-dimensional subspace; we maximize the projection-metric
+        distance ||P_c1 − P_c2||_F between their projection matrices P_c = B_c^T B_c.
+
+        Returns the MEAN of pairwise distances (positive scalar); applied with a
+        negative coefficient in compute_loss so that increasing distance reduces total.
+
+        Memory: avoids the (num_classes, num_classes, D, D) tensor via the identity
+            ||P_i − P_j||_F^2 = ||P_i||_F^2 + ||P_j||_F^2 − 2 <P_i, P_j>_F
+
+        Only the upper-triangle pairs are sqrt'd (diagonal is exactly 0 → infinite
+        gradient of sqrt → NaN in backward), so we never compute sqrt(0).
+        """
+        k = self.num_concepts_per_class
+        C = F.normalize(
+            self.concept_vectors.view(self.num_classes, k, -1), p=2, dim=2, eps=1e-8
+        )
+        P        = torch.bmm(C.transpose(1, 2), C)                  # (num_classes, D, D)
+        norms_sq = (P * P).sum(dim=(1, 2))                           # (num_classes,)
+        dots     = torch.einsum("nij,mij->nm", P, P)                # (num_classes, num_classes)
+        dist_sq  = norms_sq[:, None] + norms_sq[None, :] - 2 * dots # (num_classes, num_classes)
+        # Extract only off-diagonal pairs before sqrt to avoid sqrt(0) on diagonal
+        mask   = torch.triu(torch.ones_like(dist_sq, dtype=torch.bool), diagonal=1)
+        upper  = dist_sq[mask].clamp(min=1e-8)
+        return upper.sqrt().mean() / (2 ** 0.5)
+
     def _orthogonality_loss(self) -> torch.Tensor:
         """
         Within-class orthogonality: for each class, its K concept vectors should
@@ -221,7 +264,7 @@ class TesNet(PrototypeModel):
         k = self.num_concepts_per_class
         # Reshape to (num_classes, k, concept_dim) and row-normali`e
         C    = F.normalize(
-            self.concept_vectors.view(self.num_classes, k, -1), p=2, dim=2
+            self.concept_vectors.view(self.num_classes, k, -1), p=2, dim=2, eps=1e-8
         )
         gram = torch.bmm(C, C.transpose(1, 2))                   # (num_classes, k, k)
         eye  = torch.eye(k, device=C.device).unsqueeze(0)         # (1, k, k)
@@ -240,19 +283,73 @@ class TesNet(PrototypeModel):
         s = class_idx * self.num_concepts_per_class
         return list(range(s, s + self.num_concepts_per_class))
 
-    # push_prototypes is intentionally a no-op for TesNet — concepts are
-    # constrained via the orthogonality loss, not anchored to training patches
+    def push_prototypes(self, train_loader, device: str | torch.device) -> None:
+        """
+        Stage 2 — Embedding space transparency (Section 3.3 of the paper).
+
+        Replaces each concept vector with the feature embedding of its nearest
+        training patch from its own class:
+            b_j ← arg max_{p ∈ P_c} p^T · b_j
+
+        After this call concept_vectors literally ARE image patch embeddings, so
+        every explanation shown to a user is faithful by construction rather than
+        post-hoc approximate.  Call once near the end of training (push_epoch),
+        then freeze backbone + concept_vectors and fine-tune only the classifier.
+        """
+        self.eval()
+        self.to(device)
+        k_per_c = self.num_concepts_per_class
+
+        best_sim   = torch.full((self.num_concepts,), -float("inf"), device=device)
+        best_patch = torch.zeros(self.num_concepts, self.concept_dim, device=device)
+
+        with torch.no_grad():
+            for images, labels in train_loader:
+                images, labels = images.to(device), labels.to(device)
+                features = self.add_on_layers(self.backbone(images))   # (B, D, H, W)
+                B, D, H, W = features.shape
+
+                # Flatten spatial locations into one axis
+                patches      = features.permute(0, 2, 3, 1).reshape(B * H * W, D)  # (N, D)
+                patch_labels = labels.repeat_interleave(H * W)                      # (N,)
+                concepts_n   = F.normalize(self.concept_vectors[:, :, 0, 0], p=2, dim=1)  # (K, D)
+                patches_n    = F.normalize(patches, p=2, dim=1)
+                sims         = patches_n @ concepts_n.T                             # (N, K)
+
+                for c in range(self.num_classes):
+                    mask = patch_labels == c
+                    if not mask.any():
+                        continue
+                    ks = slice(c * k_per_c, (c + 1) * k_per_c)
+                    c_sims    = sims[mask][:, ks]           # (n_c, k_per_c)
+                    c_patches = patches[mask]               # (n_c, D)
+                    max_sims, max_idx = c_sims.max(dim=0)   # (k_per_c,)
+
+                    improved = max_sims > best_sim[ks]
+                    best_sim[ks] = torch.where(improved, max_sims, best_sim[ks])
+                    new_p = c_patches[max_idx]              # (k_per_c, D)
+                    best_patch[ks] = torch.where(improved.unsqueeze(1), new_p, best_patch[ks])
+
+        self.concept_vectors.data.copy_(best_patch.unsqueeze(-1).unsqueeze(-1))
+        print(f"Push complete — mean best cosine similarity = {best_sim.mean():.4f}")
 
     def find_concept_exemplars(
         self,
         loader,
         device: str | torch.device,
         top_n: int = 5,
+        concept_indices: list[int] | None = None,
     ) -> dict[int, list[dict]]:
         """
         For each concept, find the top_n training images that activate it most.
         Run once after training to ground each concept in real images.
         Does NOT modify concept_vectors.
+
+        Parameters
+        ----------
+        concept_indices : optional list of concept indices to compute exemplars for.
+            Defaults to all concepts. Pass model.class_concept_indices(c) to limit
+            to a single class — recommended when num_concepts is large (e.g. 2000).
 
         Returns
         -------
@@ -264,32 +361,52 @@ class TesNet(PrototypeModel):
         self.eval()
         self.to(device)
 
-        all_scores: list[torch.Tensor] = []
-        all_images: list[torch.Tensor] = []
-        all_maps:   list[torch.Tensor] = []
+        target = set(concept_indices) if concept_indices is not None else set(range(self.num_concepts))
 
+        # Streaming top-n: keep only top_n candidates per concept at all times.
+        # Avoids materialising the full (N, K, H, W) maps tensor in memory.
+        top_scores: dict[int, list[tuple[float, int]]] = {k: [] for k in target}
+        all_images: list[torch.Tensor] = []
+        # Per-image concept maps stored sparsely: img_idx → {concept_idx: map}
+        sparse_maps: list[dict[int, torch.Tensor]] = []
+
+        offset = 0
         with torch.no_grad():
             for images, _ in loader:
                 images = images.to(device)
                 out = self.explain(images)
-                all_scores.append(out["concept_scores"].cpu())
-                all_maps.append(out["concept_maps"].cpu())
-                all_images.append(images.cpu())
+                scores_b = out["concept_scores"].cpu()   # (B, K)
+                maps_b   = out["concept_maps"].cpu()     # (B, K, H, W)
+                images_b = images.cpu()
 
-        scores = torch.cat(all_scores)   # (N, K)
-        maps   = torch.cat(all_maps)     # (N, K, H, W)
-        images = torch.cat(all_images)   # (N, 3, H, W)
+                for b in range(images_b.size(0)):
+                    img_idx = offset + b
+                    all_images.append(images_b[b])
+                    batch_maps: dict[int, torch.Tensor] = {}
+
+                    for k in target:
+                        score = float(scores_b[b, k])
+                        heap = top_scores[k]
+                        if len(heap) < top_n or score > heap[0][0]:
+                            batch_maps[k] = maps_b[b, k]
+                            heap.append((score, img_idx))
+                            heap.sort(key=lambda x: x[0])
+                            if len(heap) > top_n:
+                                heap.pop(0)
+
+                    sparse_maps.append(batch_maps)
+                offset += images_b.size(0)
 
         exemplars: dict[int, list[dict]] = {}
-        for k in range(self.num_concepts):
-            top_idx = scores[:, k].topk(min(top_n, len(scores))).indices
+        for k in target:
+            candidates = sorted(top_scores[k], key=lambda x: -x[0])
             exemplars[k] = [
                 {
-                    "image":       images[i],
-                    "score":       float(scores[i, k]),
-                    "concept_map": maps[i, k].numpy(),
+                    "image":       all_images[img_idx],
+                    "score":       score,
+                    "concept_map": sparse_maps[img_idx][k].numpy(),
                 }
-                for i in top_idx
+                for score, img_idx in candidates
             ]
         return exemplars
 

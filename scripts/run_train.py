@@ -57,6 +57,8 @@ def parse_args() -> argparse.Namespace:
                    help="log intra-epoch loss every N batches for smoother curves (0 = epoch-level only)")
     p.add_argument("--eval-only", dest="eval_only", action="store_true", default=False,
                    help="skip training and load the existing checkpoint for test evaluation only")
+    p.add_argument("--no-save", dest="no_save", action="store_true", default=False,
+                   help="disable checkpoint saving (useful for quick overfit tests)")
     p.add_argument("--warm-epochs",   dest="warm_epochs",   type=int,  default=0,
                    help="freeze backbone for first N epochs; paper value for TesNet: 5")
     p.add_argument("--use-bbox-crop", dest="use_bbox_crop", action="store_true", default=False,
@@ -77,6 +79,8 @@ def parse_args() -> argparse.Namespace:
                    help="TesNet: cluster loss — pull features toward same-class concepts (paper value: 0.8)")
     p.add_argument("--lambda-sep",         dest="lambda_sep",         type=float, default=0.08,
                    help="TesNet: separation loss — push features from other-class concepts (paper value: 0.08)")
+    p.add_argument("--lambda-ss",          dest="lambda_ss",          type=float, default=0.08,
+                   help="TesNet: subspace separation on Grassmann manifold (mean formulation, stable scale)")
     p.add_argument("--lambda-l1",          dest="lambda_l1",          type=float, default=1e-4,
                    help="TesNet: L1 sparsity on classifier weights (paper value: 1e-4)")
 
@@ -103,6 +107,7 @@ def build_model(args) -> nn.Module:
             lambda_clst=args.lambda_clst,
             lambda_sep=args.lambda_sep,
             lambda_ortho=args.lambda_ortho,
+            lambda_ss=args.lambda_ss,
             lambda_l1=args.lambda_l1,
         )
 
@@ -196,6 +201,16 @@ def generate_training_run_tag(args) -> str:
 
 def main() -> None:
     args = parse_args()
+
+    # Default push_epoch for TesNet: push at 75% through training so the remaining
+    # 25% of epochs become classifier-only fine-tuning against anchored concepts.
+    # Mirrors the paper's push_start=10 out of 20 total epochs (50%), shifted later
+    # because we do not have a separate last_only loop.
+    if args.method == "tesnet" and args.push_epoch is None:
+        # Push at 70% through training so post-push fine-tuning epochs fall
+        # within the patience window (epochs_left > patience after push)
+        args.push_epoch = max(1, int(args.epochs * 0.70))
+
     run_tag = generate_training_run_tag(args)
 
     # Load data
@@ -224,6 +239,8 @@ def main() -> None:
     with open(method_ckpt_dir / f"{run_tag}_config.json", "w") as f:
         json.dump(config, f, indent=2)
 
+    ckpt_path_to_use = None if args.no_save else ckpt_path
+
     if args.eval_only:
         print(f"Eval-only mode; loading checkpoint: {ckpt_path}")
         train_minutes = 0.0
@@ -238,13 +255,14 @@ def main() -> None:
             val_every=args.val_every,
             push_epoch=args.push_epoch,
             patience=args.patience,
-            checkpoint_path=ckpt_path,
+            checkpoint_path=ckpt_path_to_use,
         )
         train_minutes = (time.time() - t0) / 60
         print(f"\nTraining complete in {train_minutes:.1f} min; Best checkpoint: {ckpt_path}")
 
-    # Load best weights for evaluation
-    trainer.load_checkpoint(ckpt_path)
+    # Load best weights for evaluation (skip if --no-save: model already has last-epoch weights)
+    if not args.no_save:
+        trainer.load_checkpoint(ckpt_path)
 
     # Evaluate on test split
     results = evaluate_model(model, test_loader, args.device)

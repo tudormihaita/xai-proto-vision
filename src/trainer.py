@@ -35,8 +35,8 @@ class Trainer:
         self.loss_fn = loss_fn
         self.device = device
         self.scheduler = scheduler
-        self.log_every = log_every    # log intra-epoch every N batches; 0 = epoch-level only
-        self.warm_epochs = warm_epochs  # freeze backbone for first N epochs (0 = disabled)
+        self.log_every = log_every        # log intra-epoch every N batches; 0 = epoch-level only
+        self.warm_epochs = warm_epochs    # freeze backbone for first N epochs (0 = disabled)
         self._step_log: list[tuple[float, float]] = []
 
 
@@ -96,11 +96,18 @@ class Trainer:
             for k, v in train_metrics.items(): # extra loss components
                 history.setdefault(k, []).append(v)
 
-            # prototype push step (only relevant for ProtoPNet and ProtoTree)
+            # prototype push step
             if push_epoch is not None and epoch == push_epoch:
                 if isinstance(self.model, PrototypeModel):
                     print("Pushing prototypes...")
                     self.model.push_prototypes(train_loader, self.device)
+                    # Freeze backbone + concept vectors so remaining epochs
+                    # fine-tune only the classifier against anchored concepts
+                    if hasattr(self.model, "freeze_backbone"):
+                        self.model.freeze_backbone()
+                    if hasattr(self.model, "concept_vectors"):
+                        self.model.concept_vectors.requires_grad_(False)
+                    print("Post-push: backbone and concepts frozen — classifier fine-tuning")
                 else:
                     print(f"Warning: --push-epoch set but {type(self.model).__name__} is not a PrototypeModel")
 
