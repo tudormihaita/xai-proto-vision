@@ -1,8 +1,8 @@
 from torch.utils.data import Dataset
 
-from src.data.datasets import CUB200Dataset
+from src.data.datasets import CUB200Dataset, StanfordCarsDataset
 from src.data.transforms import get_transforms
-from src.constants import CUB200_ROOT, SUPPORTED_DATASETS
+from src.constants import CUB200_ROOT, STANFORD_CARS_ROOT, SUPPORTED_DATASETS
 
 
 def load_dataset(
@@ -31,6 +31,15 @@ def load_dataset(
     if name == "cub200":
         return CUB200Dataset(
             root=root or CUB200_ROOT,
+            split=split,
+            transform=transform,
+            use_bbox_crop=use_bbox_crop,
+            **dataset_kwargs,
+        )
+
+    if name == "stanford_cars":
+        return StanfordCarsDataset(
+            root=root or STANFORD_CARS_ROOT,
             split=split,
             transform=transform,
             use_bbox_crop=use_bbox_crop,
