@@ -90,7 +90,7 @@ class PrototypeModel(BaseModel, ABC):
     Adds three responsibilities on top of BaseModel:
       - compute_loss(): returns a dict of loss components (total + per-term)
       - push_prototypes(): no-op by default; overridden by ProtoPNet & ProtoTree
-      - parameter group accessors for selective optimisation during phased training
+      - parameter group accessors for selective optimization during phased training
     """
     @abstractmethod
     def compute_loss(
@@ -109,7 +109,7 @@ class PrototypeModel(BaseModel, ABC):
         """
         Scans the full training set and anchors each prototype to the nearest
         real training patch. No-op in the base class; overridden by ProtoPNet
-        and ProtoTree. TesNet and PIPNet leave this as a no-op.
+        and ProtoTree.
         """
 
     def get_backbone_params(self):

@@ -13,7 +13,7 @@ Adding a new method
 -------------------
 1. Implement src/models/<method>.py (subclass PrototypeModel).
 2. Change the branch in build_model() below with correct configuration, and add any method-specific hyperparameters to parse_args().
-3. The shared Trainer handles training automatically — no Trainer subclass needed
+3. The shared Trainer handles training automatically, no Trainer subclass needed
    unless the method requires phased optimization (e.g. ProtoPNet 3-phase training).
 """
 
@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lambda-sep",         dest="lambda_sep",         type=float, default=0.08,
                    help="TesNet: separation loss — push features from other-class concepts (paper value: 0.08)")
     p.add_argument("--lambda-ss",          dest="lambda_ss",          type=float, default=0.08,
-                   help="TesNet: subspace separation on Grassmann manifold (mean formulation, stable scale)")
+                   help="TesNet: subspace separation on Grassmann manifold (mean over pairs; paper uses sum with 1e-7, equiv scale here is 0.08)")
     p.add_argument("--lambda-l1",          dest="lambda_l1",          type=float, default=1e-4,
                    help="TesNet: L1 sparsity on classifier weights (paper value: 1e-4)")
 
@@ -134,7 +134,6 @@ def build_optimizer(args, model: nn.Module) -> torch.optim.Optimizer:
     wd = args.weight_decay
 
     if isinstance(model, TesNet):
-        # Three-group optimizer matching paper: backbone 1e-4, add_on+concepts 3e-3, classifier 1e-4
         return torch.optim.Adam([
             {"params": model.backbone.parameters(),        "lr": 1e-4,  "weight_decay": 1e-3},
             {"params": list(model.add_on_layers.parameters()) + [model.concept_vectors],
@@ -161,21 +160,8 @@ def build_scheduler(args, optimizer, num_epochs: int):
 
 
 def build_trainer(args, model: nn.Module) -> Trainer:
-    """
-    Builds the optimizer, scheduler and Trainer for the given method.
-
-    Add a branch here if required when a method needs a custom Trainer subclass
-    (e.g. ProtoPNet's 3-phase training that freezes/unfreezes the backbone
-    at specific epochs — that requires overriding training_step).
-    All other methods use the base Trainer unchanged.
-    """
     optimizer = build_optimizer(args, model)
     scheduler = build_scheduler(args, optimizer, args.epochs)
-
-    # ProtoPNet: replace with ProtoPNetTrainer once implemented by Member B
-    # if args.method == "protopnet":
-    #     from src.models.protopnet import ProtoPNetTrainer
-    #     return ProtoPNetTrainer(model, optimizer, nn.CrossEntropyLoss(), args.device, scheduler)
 
     return Trainer(model, optimizer, nn.CrossEntropyLoss(), args.device,
                    scheduler=scheduler, log_every=args.log_every,
@@ -202,25 +188,19 @@ def generate_training_run_tag(args) -> str:
 def main() -> None:
     args = parse_args()
 
-    # Default push_epoch for TesNet: push at 75% through training so the remaining
-    # 25% of epochs become classifier-only fine-tuning against anchored concepts.
-    # Mirrors the paper's push_start=10 out of 20 total epochs (50%), shifted later
-    # because we do not have a separate last_only loop.
+    # Push at 70% so the remaining 30% of epochs recalibrate the classifier;
+    # ensures post-push epochs fall within the early-stopping patience window.
     if args.method == "tesnet" and args.push_epoch is None:
-        # Push at 70% through training so post-push fine-tuning epochs fall
-        # within the patience window (epochs_left > patience after push)
         args.push_epoch = max(1, int(args.epochs * 0.70))
 
     run_tag = generate_training_run_tag(args)
 
-    # Load data
     loader_kwargs  = dict(batch_size=args.batch_size, num_workers=args.workers, pin_memory=True)
     dataset_kwargs = dict(use_bbox_crop=args.use_bbox_crop)
     train_loader = DataLoader(load_dataset(args.dataset, "train", **dataset_kwargs), shuffle=True,  **loader_kwargs)
     val_loader   = DataLoader(load_dataset(args.dataset, "val",   **dataset_kwargs), shuffle=False, **loader_kwargs)
     test_loader  = DataLoader(load_dataset(args.dataset, "test",  **dataset_kwargs), shuffle=False, **loader_kwargs)
 
-    # Initialize model and trainer
     model = build_model(args)
     model.to(args.device)
 
@@ -229,15 +209,16 @@ def main() -> None:
 
     trainer = build_trainer(args, model)
 
-    # Training loop — checkpoints saved under checkpoints/<method>/
     method_ckpt_dir = CHECKPOINTS_ROOT / args.method
     method_ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = str(method_ckpt_dir / f"{run_tag}_best.pt")
 
-    # Save hyperparams alongside checkpoint so trained model can be loaded for inference usage
     config = vars(args)
     with open(method_ckpt_dir / f"{run_tag}_config.json", "w") as f:
         json.dump(config, f, indent=2)
+
+    if args.eval_only and args.no_save:
+        raise ValueError("--eval-only and --no-save cannot be combined: eval-only mode requires an existing checkpoint")
 
     ckpt_path_to_use = None if args.no_save else ckpt_path
 
@@ -260,11 +241,10 @@ def main() -> None:
         train_minutes = (time.time() - t0) / 60
         print(f"\nTraining complete in {train_minutes:.1f} min; Best checkpoint: {ckpt_path}")
 
-    # Load best weights for evaluation (skip if --no-save: model already has last-epoch weights)
-    if not args.no_save:
+    # eval-only always loads; normal training loads best checkpoint unless --no-save
+    if args.eval_only or not args.no_save:
         trainer.load_checkpoint(ckpt_path)
 
-    # Evaluate on test split
     results = evaluate_model(model, test_loader, args.device)
     per_class = results.pop("per_class_accuracy")   # numpy array -> save stats, not raw array
     results["per_class_acc_mean"] = float(per_class.mean())
@@ -281,7 +261,6 @@ def main() -> None:
 
     print_results(results, model_name=run_tag)
 
-    # Save per-run results CSV
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     csv_path = RESULTS_ROOT / f"{run_tag}_results.csv"
     fields = [

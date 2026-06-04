@@ -1,11 +1,11 @@
 """
-TesNet — Transparent Embedding Space Network
+TesNet: Transparent Embedding Space Network
 Paper: "Interpretable Image Recognition by Constructing Transparent Embedding Space"
-       Wang, Liu, Wang & Jing — ICCV 2021
+       Wang, Liu, Wang & Jing - ICCV 2021
 
 Architecture:
-  backbone  →  add_on_layers (bottleneck + sigmoid)  →  concept projection
-           →  global max pool  →  linear classifier
+  backbone  -> add_on_layers (bottleneck + sigmoid) -> concept projection
+            -> global max pool -> linear classifier
 
 Concept projection:
   - concept_vectors: (num_concepts_per_class × num_classes, concept_dim, 1, 1) explicit parameter
@@ -13,13 +13,13 @@ Concept projection:
   - global max pool picks the single best-matching location per concept across the feature map
   - each concept belongs to exactly one class (prototype_class_identity buffer); scales to any dataset
 
-Loss (from settings_CUB.py / paper):
+Loss:
   total = CE(logits, y)
-        + λ_clst  * cluster_loss          (pull features toward same-class concepts,    coef=0.8)
-        − λ_sep   * sep_loss              (push features away from other-class concepts, coef=0.08)
-        + λ_ortho * ||C_c C_c^T − I||²_F  (within-class orthogonality per class c,      coef=1e-4)
-        − λ_ss    * Σ ||P_c1 − P_c2||_F   (push class subspaces apart, Grassmann,       coef=1e-7)
-        + λ_l1    * ||W_cls||_1            (sparsity on classifier weights,              coef=1e-4)
+        + λ_clst  * cluster_loss           (pull features toward same-class concepts)
+        − λ_sep   * sep_loss               (push features away from other-class concepts)
+        + λ_ortho * ||C_c C_c^T − I||²_F   (within-class orthogonality per class c)
+        − λ_ss    * mean||P_c1 − P_c2||_F  (push class subspaces apart, Grassmann)
+        + λ_l1    * ||W_cls||_1            (sparsity on classifier weights)
 """
 
 import torch
@@ -31,27 +31,26 @@ from src.models.base_model import PrototypeModel, build_backbone
 
 class TesNet(PrototypeModel):
     """
-    Wang et al. (ICCV 2021): "Interpretable Image Recognition by Constructing Transparent Embedding Space."
+    TesNet prototype model with a ResNet or VGG backbone.
 
     Parameters
-    ----------
     backbone_name : str
         "resnet34" or "vgg16".
     num_classes : int
         Number of output classes. Drives total concept count automatically.
     num_concepts_per_class : int
         Number of concept vectors per class.  Total = num_concepts_per_class × num_classes.
-        Paper value: 10 (→ 2000 total for CUB-200).  Sweep: 5, 10, 20.
+        Paper value: 10 (→ 2000 total for CUB-200). Sweep: 5, 10, 20.
     concept_dim : int
         Dimension of concept space after bottleneck projection.  Paper value: 64.
     lambda_clst : float
-        Cluster loss weight.  Paper value: 0.8.
+        Cluster loss weight. Paper value: 0.8.
     lambda_sep : float
-        Separation loss weight (applied with negative sign).  Paper value: 0.08.
+        Separation loss weight (applied with negative sign). Paper value: 0.08.
     lambda_ortho : float
-        Within-class orthogonality regularization.  Paper value: 1e-4.
+        Within-class orthogonality regularization. Paper value: 1e-4.
     lambda_l1 : float
-        L1 sparsity on classifier weights.  Paper value: 1e-4.
+        L1 sparsity on classifier weights. Paper value: 1e-4.
     """
 
     def __init__(
@@ -80,13 +79,12 @@ class TesNet(PrototypeModel):
         self.lambda_l1     = lambda_l1
 
         # prototype_class_identity[k, c] = 1  iff concept k belongs to class c.
-        # Registered as a buffer so it moves with the model (to/from GPU) automatically
         class_identity = torch.zeros(self.num_concepts, num_classes)
         for k in range(self.num_concepts):
             class_identity[k, k // num_concepts_per_class] = 1
         self.register_buffer("prototype_class_identity", class_identity)
 
-        # Bottleneck: compresses backbone features into bounded concept space
+        # bottleneck: compresses backbone features into bounded concept space
         # Sigmoid ensures activations are in [0, 1] before projection
         self.add_on_layers = nn.Sequential(
             nn.Conv2d(feature_dim, concept_dim, kernel_size=1),
@@ -96,14 +94,14 @@ class TesNet(PrototypeModel):
         )
 
         # Concept vectors: shape (num_concepts, concept_dim, 1, 1)
-        # Used as conv2d weights (after L2 normalization) to compute per-location
+        # used as conv2d weights (after L2 normalization) to compute per-location
         # cosine similarities between feature maps and concept directions
         self.concept_vectors = nn.Parameter(
             torch.rand(self.num_concepts, concept_dim, 1, 1), requires_grad=True
         )
 
-        # Linear classifier: concept scores -> class logits.  No bias so that all
-        # class discrimination must flow through concept activations
+        # linear classifier: concept scores -> class logits
+        # no bias so that all class discrimination must flow through concept activations
         self.classifier = nn.Linear(self.num_concepts, num_classes, bias=False)
 
         self._init_weights()
@@ -115,14 +113,14 @@ class TesNet(PrototypeModel):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        # Per-class orthogonal init: within each class the K concepts start as an
-        # orthogonal basis.  Different classes are initialized independently
+        # per-class orthogonal init: within each class the K concepts start as an
+        # orthogonal basis; different classes are initialized independently
         k = self.num_concepts_per_class
         for c in range(self.num_classes):
             s = c * k
             nn.init.orthogonal_(self.concept_vectors[s : s + k].view(k, -1))
 
-        # Classifier init from paper: +1 for same-class concept connections,
+        # classifier init from paper: +1 for same-class concept connections,
         # -0.5 for cross-class, so the model starts with correct-class concepts contributing positively
         self._init_classifier(incorrect_strength=-0.5)
 
@@ -140,13 +138,13 @@ class TesNet(PrototypeModel):
         return self.classifier(concept_scores)                   # (B, num_classes)
 
     def _project(self, features: torch.Tensor) -> torch.Tensor:
-        """Projection magnitude onto normalised concept basis → (B, num_concepts)."""
+        """Projection magnitude onto normalised concept basis -> (B, num_concepts)."""
         norm_cv = F.normalize(self.concept_vectors, p=2, dim=1, eps=1e-8)
         proj    = F.conv2d(features, norm_cv)                    # (B, K, H, W)
         return F.adaptive_max_pool2d(proj, (1, 1)).flatten(1)   # (B, K)
 
     def _cosine_distances(self, features: torch.Tensor) -> torch.Tensor:
-        """Cosine distance from every spatial location to each concept → (B, K, H, W)."""
+        """Cosine distance from every spatial location to each concept -> (B, K, H, W)."""
         feat_norm = F.normalize(features, p=2, dim=1, eps=1e-8)
         conc_norm = F.normalize(self.concept_vectors, p=2, dim=1, eps=1e-8)
         return -F.conv2d(feat_norm, conc_norm)   # negate similarity → distance
@@ -192,24 +190,23 @@ class TesNet(PrototypeModel):
         labels: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        cos_dists : (B, K, H, W) — cosine distances to each concept at every location.
-        labels    : (B,)         — ground-truth class indices.
+        cos_dists : (B, K, H, W) cosine distances to each concept at every location.
+        labels    : (B,)         ground-truth class indices.
 
         Returns
-        -------
         clst_loss : mean of each image's min distance to its same-class concepts
-                    (we want this small → pull toward correct-class concepts)
+                    (we want this small -> pull toward correct-class concepts)
         sep_loss  : mean of each image's min distance to other-class concepts
-                    (we want this large → applied with negative sign in total)
+                    (we want this large -> applied with negative sign in total)
         """
-        # Reduce spatial dimensions: min distance per concept over all locations -> (B, K)
+        # reduce spatial dimensions: min distance per concept over all locations -> (B, K)
         min_per_concept = cos_dists.flatten(2).min(dim=2).values
 
-        # Boolean mask (B, K): True where concept k belongs to image i's class
+        # boolean mask (B, K): True where concept k belongs to image i's class
         # prototype_class_identity is (K, num_classes); indexing by labels gives (K, B)
         same = self.prototype_class_identity[:, labels].T.bool()   # (B, K)
 
-        large = torch.tensor(1e4, device=cos_dists.device)
+        large = min_per_concept.new_tensor(1e4)   # matches input dtype/device
         clst_loss = min_per_concept.where(same,  large).min(dim=1).values.mean()
         sep_loss  = min_per_concept.where(~same, large).min(dim=1).values.mean()
         return clst_loss, sep_loss
@@ -236,17 +233,17 @@ class TesNet(PrototypeModel):
             ||P_i − P_j||_F^2 = ||P_i||_F^2 + ||P_j||_F^2 − 2 <P_i, P_j>_F
 
         Only the upper-triangle pairs are sqrt'd (diagonal is exactly 0 → infinite
-        gradient of sqrt → NaN in backward), so we never compute sqrt(0).
+        gradient of sqrt -> NaN in backward), so we never compute sqrt(0).
         """
         k = self.num_concepts_per_class
         C = F.normalize(
             self.concept_vectors.view(self.num_classes, k, -1), p=2, dim=2, eps=1e-8
         )
-        P        = torch.bmm(C.transpose(1, 2), C)                  # (num_classes, D, D)
-        norms_sq = (P * P).sum(dim=(1, 2))                           # (num_classes,)
-        dots     = torch.einsum("nij,mij->nm", P, P)                # (num_classes, num_classes)
+        P        = torch.bmm(C.transpose(1, 2), C)       # (num_classes, D, D)
+        norms_sq = (P * P).sum(dim=(1, 2))                          # (num_classes,)
+        dots     = torch.einsum("nij,mij->nm", P, P)          # (num_classes, num_classes)
         dist_sq  = norms_sq[:, None] + norms_sq[None, :] - 2 * dots # (num_classes, num_classes)
-        # Extract only off-diagonal pairs before sqrt to avoid sqrt(0) on diagonal
+
         mask   = torch.triu(torch.ones_like(dist_sq, dtype=torch.bool), diagonal=1)
         upper  = dist_sq[mask].clamp(min=1e-8)
         return upper.sqrt().mean() / (2 ** 0.5)
@@ -258,11 +255,11 @@ class TesNet(PrototypeModel):
         all classes simultaneously — O(num_classes × K² × D).
 
         Cross-class orthogonality is intentionally NOT enforced: different classes
-        can share low-level visual features (edges, colours) without harming
+        can share low-level visual features (edges, colors) without harming
         interpretability.
         """
         k = self.num_concepts_per_class
-        # Reshape to (num_classes, k, concept_dim) and row-normali`e
+        # reshape to (num_classes, k, concept_dim) and row-normalize
         C    = F.normalize(
             self.concept_vectors.view(self.num_classes, k, -1), p=2, dim=2, eps=1e-8
         )
@@ -285,15 +282,15 @@ class TesNet(PrototypeModel):
 
     def push_prototypes(self, train_loader, device: str | torch.device) -> None:
         """
-        Stage 2 — Embedding space transparency (Section 3.3 of the paper).
+        Stage 2: Embedding space transparency.
 
         Replaces each concept vector with the feature embedding of its nearest
         training patch from its own class:
-            b_j ← arg max_{p ∈ P_c} p^T · b_j
+            b_j <- arg max_{p ∈ P_c} p^T · b_j
 
         After this call concept_vectors literally ARE image patch embeddings, so
         every explanation shown to a user is faithful by construction rather than
-        post-hoc approximate.  Call once near the end of training (push_epoch),
+        post-hoc approximate. Call once near the end of training (push_epoch),
         then freeze backbone + concept_vectors and fine-tune only the classifier.
         """
         self.eval()
@@ -309,7 +306,7 @@ class TesNet(PrototypeModel):
                 features = self.add_on_layers(self.backbone(images))   # (B, D, H, W)
                 B, D, H, W = features.shape
 
-                # Flatten spatial locations into one axis
+                # flatten spatial locations into one axis
                 patches      = features.permute(0, 2, 3, 1).reshape(B * H * W, D)  # (N, D)
                 patch_labels = labels.repeat_interleave(H * W)                      # (N,)
                 concepts_n   = F.normalize(self.concept_vectors[:, :, 0, 0], p=2, dim=1)  # (K, D)
@@ -331,7 +328,7 @@ class TesNet(PrototypeModel):
                     best_patch[ks] = torch.where(improved.unsqueeze(1), new_p, best_patch[ks])
 
         self.concept_vectors.data.copy_(best_patch.unsqueeze(-1).unsqueeze(-1))
-        print(f"Push complete — mean best cosine similarity = {best_sim.mean():.4f}")
+        print(f"Push complete; mean best cosine similarity = {best_sim.mean():.4f}")
 
     def find_concept_exemplars(
         self,
@@ -346,13 +343,11 @@ class TesNet(PrototypeModel):
         Does NOT modify concept_vectors.
 
         Parameters
-        ----------
         concept_indices : optional list of concept indices to compute exemplars for.
             Defaults to all concepts. Pass model.class_concept_indices(c) to limit
             to a single class — recommended when num_concepts is large (e.g. 2000).
 
         Returns
-        -------
         dict: concept_idx (int) → list of top_n dicts, each with:
             image       : (3, H, W) tensor
             score       : float   — concept activation for this image
@@ -364,7 +359,8 @@ class TesNet(PrototypeModel):
         target = set(concept_indices) if concept_indices is not None else set(range(self.num_concepts))
 
         # Streaming top-n: keep only top_n candidates per concept at all times.
-        # Avoids materialising the full (N, K, H, W) maps tensor in memory.
+        # self.explain() still produces a (B, K, H, W) tensor per batch, but we
+        # avoid accumulating all batches into a single (N, K, H, W) dataset tensor.
         top_scores: dict[int, list[tuple[float, int]]] = {k: [] for k in target}
         all_images: list[torch.Tensor] = []
         # Per-image concept maps stored sparsely: img_idx → {concept_idx: map}
@@ -415,12 +411,10 @@ class TesNet(PrototypeModel):
         Returns concept activation information for visualization.
 
         Keys
-        ----
-        concept_scores    : (B, K)        global per-concept activation
-        concept_maps      : (B, K, H', W') spatial activation before pooling —
-                             upsample to input size and overlay on the image
+        concept_scores    : (B, K)          global per-concept activation
+        concept_maps      : (B, K, H', W')  spatial activation before pooling; upsample to input size and overlay on the image
         logits            : (B, num_classes)
-        predicted_classes : (B,)          argmax of logits
+        predicted_classes : (B,)             argmax of logits
         """
         with torch.no_grad():
             features     = self.add_on_layers(self.backbone(x))

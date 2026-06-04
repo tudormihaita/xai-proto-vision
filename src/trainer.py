@@ -101,13 +101,19 @@ class Trainer:
                 if isinstance(self.model, PrototypeModel):
                     print("Pushing prototypes...")
                     self.model.push_prototypes(train_loader, self.device)
-                    # Freeze backbone + concept vectors so remaining epochs
-                    # fine-tune only the classifier against anchored concepts
+                    # freeze backbone, add_on_layers, and concept_vectors so the
+                    # embedding space stays fixed and only the classifier updates.
+
+                    # leaving add_on_layers trainable would shift the embedding space
+                    # and de-anchor the concept_vectors from their pushed patches.
                     if hasattr(self.model, "freeze_backbone"):
                         self.model.freeze_backbone()
+                    if hasattr(self.model, "add_on_layers"):
+                        for p in self.model.add_on_layers.parameters():
+                            p.requires_grad_(False)
                     if hasattr(self.model, "concept_vectors"):
                         self.model.concept_vectors.requires_grad_(False)
-                    print("Post-push: backbone and concepts frozen — classifier fine-tuning")
+                    print("Post-push: backbone, add-on layers and concepts frozen — classifier fine-tuning")
                 else:
                     print(f"Warning: --push-epoch set but {type(self.model).__name__} is not a PrototypeModel")
 
