@@ -264,4 +264,3 @@ class Trainer:
             self.scheduler.load_state_dict(checkpoint["scheduler_state"])
         print(f"Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
         return checkpoint["history"]
-    
