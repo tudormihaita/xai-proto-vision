@@ -29,15 +29,10 @@ class ProtoTree(PrototypeModel):
         self.lambda_cluster = lambda_cluster
         self.temperature = temperature
 
-        # Inițializare Xavier/He pentru prototipuri
         self.prototypes = nn.Parameter(torch.randn(self.num_nodes, feature_dim) / (feature_dim ** 0.5))
         
-        # Logits inițiale pentru frunze (clasificatorul final)
         self.leaf_logits = nn.Parameter(torch.randn(self.num_leaves, num_classes) * 0.01)
         
-        # REPARAȚIE CRITICĂ 1: Rupem Simetria (The Symmetric Saddle Point)
-        # Folosim un scale mediu (5.0) și adăugăm zgomot în bias (0.5) 
-        # ca arborele să fie curajos și să o ia la stânga/dreapta de la prima epocă!
         self.node_scales = nn.Parameter(torch.ones(self.num_nodes) * 5.0)
         self.node_biases = nn.Parameter(torch.randn(self.num_nodes) * 0.5)
 
@@ -78,16 +73,13 @@ class ProtoTree(PrototypeModel):
         features = self.backbone(x)
         b, c, h, w = features.shape
 
-        # OPTIMIZARE VITEZĂ & RAM: Calculul similarităților prin Convoluție 1x1 
         features_norm = F.normalize(features, dim=1) # (B, C, H, W)
         proto_norm = F.normalize(self.prototypes, dim=1).view(self.num_nodes, c, 1, 1)
         
         self._patch_sims = F.conv2d(features_norm, proto_norm) # (B, num_nodes, H, W)
 
-        # Extragem scorul cel mai mare cu un max-pool global
         self._node_sims = F.adaptive_max_pool2d(self._patch_sims, (1, 1)).view(b, self.num_nodes)
 
-        # REPARAȚIE: torch.abs(self.node_scales) previne inversarea logicii
         scaled_sims = (self._node_sims * torch.abs(self.node_scales) + self.node_biases) / self.temperature
         p_right = torch.sigmoid(scaled_sims)
         self._p_right = p_right
@@ -101,8 +93,7 @@ class ProtoTree(PrototypeModel):
 
     def compute_loss(self, logits: torch.Tensor, labels: torch.Tensor, features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         cls_loss = F.cross_entropy(logits, labels)
-        
-        # Balance loss ponderat exponențial în funcție de adâncimea nivelului
+    
         mean_routing = self._p_right.mean(dim=0)
         target_routing = torch.full_like(mean_routing, 0.5)
         node_mse = (mean_routing - target_routing) ** 2
@@ -111,14 +102,13 @@ class ProtoTree(PrototypeModel):
         node_id = 0
         for d in range(self.depth):
             nodes_in_level = 2 ** d
-            # Nodurile de sus sunt critice (w=1.0). Frunzele contează mai puțin.
             weights[node_id : node_id + nodes_in_level] = 0.5 ** d
             node_id += nodes_in_level
             
         balance_loss = torch.sum(node_mse * weights) / torch.sum(weights)
         
         with torch.no_grad():
-            max_sims, _ = self._node_sims.max(dim=0) # Refolosim calculele din forward!
+            max_sims, _ = self._node_sims.max(dim=0)
             cluster_metric = -max_sims.mean()
         
         total_loss = cls_loss + self.lambda_cluster * balance_loss
@@ -146,8 +136,6 @@ class ProtoTree(PrototypeModel):
                 images = images.to(device)
                 features = self.backbone(images)
                 b, c, h, w = features.shape
-
-                # Același truc rapid 1x1 Conv pentru a găsi patch-urile de înlocuit
                 features_norm = F.normalize(features, dim=1)
                 proto_norm = F.normalize(self.prototypes, dim=1).view(self.num_nodes, c, 1, 1)
                 
@@ -170,13 +158,9 @@ class ProtoTree(PrototypeModel):
         self.prototypes.data.copy_(best_patches)
     
     def post_push_init(self) -> None:
-        # REPARAȚIE CRITICĂ 2: Oprim Amnezia!
-        # Rețeaua are nevoie de stratul ei liniar (leaf_logits) învățat timp de 80 de epoci.
-        # NU mai suprascriem cu zero.
         pass
     
     def init_leaf_logits_balanced(self, num_classes: int) -> None:
-        # Păstrăm funcția doar pentru compatibilitate cu interfața de bază, dar nu o mai apelăm la push.
         pass
 
     def explain(self, x: torch.Tensor) -> dict:
