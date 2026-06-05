@@ -17,7 +17,7 @@ different angle, and each one builds on the limitations of the previous:
 |---|---|---|---|-----|
 | [ProtoPNet](https://arxiv.org/abs/1806.10574) | 2019 | Class-specific prototype patches in latent space | Prototypes are abstract, class-specific — redundant | Raul (Member B)  |
 | [ProtoTree](https://arxiv.org/abs/2012.02046) | 2021 | Shared prototypes organized as a soft decision tree | Soft routing blurs decision paths | Razvan (Member C) |
-| [TesNet](https://arxiv.org/abs/2105.02968) | 2021 | Orthogonal concept basis vectors in embedding space | Concepts may not be human-meaningful | Tudor  (Member A) | 
+| [TesNet](https://openaccess.thecvf.com/content/ICCV2021/papers/Wang_Interpretable_Image_Recognition_by_Constructing_Transparent_Embedding_Space_ICCV_2021_paper.pdf) | 2021 | Orthogonal concept basis vectors in embedding space | Concepts may not be human-meaningful | Tudor  (Member A) | 
 | [PIPNet](https://arxiv.org/abs/2307.03672) | 2023 | Sparse activation over real training image patches | Sensitive sparsity threshold hyperparameter | Dragos (Member D) |
 
 **Backbone:** ResNet-34 pretrained on ImageNet  
@@ -360,7 +360,7 @@ interpretability capacity. This is the main result table in the report.
 | Baseline | `--backbone` | `resnet34`, `vgg16` | `python scripts/run_train.py --method baseline --backbone resnet34 --dataset cub200 --epochs 100` |
 | ProtoPNet | `--num-prototypes` | `5`, `10`, `20`, `50` | `python scripts/run_train.py --method protopnet --num-prototypes 10 --dataset cub200 --epochs 100` |
 | ProtoTree | `--depth` | `4`, `6`, `8` | `python scripts/run_train.py --method prototree --depth 6 --dataset cub200 --epochs 100` |
-| TesNet | `--num-concepts` | `16`, `32`, `64` | `python scripts/run_train.py --method tesnet --num-concepts 32 --dataset cub200 --epochs 100` |
+| TesNet | `--num-concepts` | `5`, `10`, `20` | `python scripts/run_train.py --method tesnet --num-concepts 10 --dataset cub200 --epochs 50 --warm-epochs 5 --scheduler step --step-size 5` |
 | PIPNet | `--sparsity-threshold` | `0.05`, `0.1`, `0.2` | `python scripts/run_train.py --method pipnet --sparsity-threshold 0.1 --dataset cub200 --epochs 100` |
 
 ### Step 2 — Cross-dataset validation (Stanford Cars)
