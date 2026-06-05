@@ -233,6 +233,9 @@ results/*
 
 tests/
 final_experiments/
+raul_docs/
 experiments/
+protopnet_paper/
+.agents/
 *.zip
 *.tgz

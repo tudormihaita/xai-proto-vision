@@ -19,8 +19,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
+from torchvision import transforms
 
-from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD, get_transforms
+from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD
 
 # matplotlib is an optional (notebook) dependency; import lazily so the module
 # can be imported in headless test environments without it.
@@ -36,8 +37,35 @@ HEAT_WEIGHT = 0.3
 # Percentile of the upsampled activation kept when drawing the bounding box
 # (Chen et al. ``find_high_activation_crop`` default).
 BBOX_PERCENTILE = 95.0
+# A 95th-percentile high-activation region wider than this fraction of the image
+# is treated as diffuse/saturated (no localised peak) — see :func:`_proto_bbox`.
+DIFFUSE_AREA_FRAC = 0.5
+# Receptive-field fallback box size, in feature-cell units: the box side spans
+# ~RF_CELLS cells centred on the most-activated cell. Approximates the effective
+# receptive field of one 1x1 prototype unit on the 7x7 grid of a 224px input.
+RF_CELLS = 3.0
 TEST_BOX_COLOR = (0, 255, 255)  # cyan
 SOURCE_BOX_COLOR = (255, 255, 0)  # yellow
+
+
+def paper_eval_transform(image_size: int = 224) -> transforms.Compose:
+    """Deterministic, paper-faithful eval/push transform (square resize, no crop).
+
+    Chen et al. (``main.py``) resize **every** split — train, push and test — with
+    ``Resize((img_size, img_size))`` (a direct square resize, *not*
+    ``Resize(256) + CenterCrop(224)``). Reusing the exact same recipe for the
+    push loader, the eval loaders and the source-image rendering here keeps three
+    things aligned: (1) train and eval see the same scale/aspect, (2) the prototype
+    figures match the scale the paper's figures use, and (3) the source image is
+    framed at push time exactly as it is re-rendered at visualisation time, so the
+    7x7 grid / heatmap / box line up. Import this in the notebook so the data
+    loaders and the visualiser cannot drift apart.
+    """
+    return transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
 
 
 def denormalize(image: torch.Tensor) -> Image.Image:
@@ -156,7 +184,9 @@ def _prepare_image(
     if bbox is not None:
         x, y, w, h = bbox
         pil_image = pil_image.crop((x, y, x + w, y + h))
-    transform = get_transforms("test", image_size)
+    # Square resize (no center-crop): MUST match the push loader's transform so
+    # the re-rendered source frames the bird exactly as it was at push time.
+    transform = paper_eval_transform(image_size)
     return transform(pil_image).unsqueeze(0).to(device)
 
 
@@ -193,16 +223,29 @@ def _proto_bbox(
     location=None,
     grid_size: int | None = None,
 ) -> tuple[int, int, int, int] | None:
-    """Paper-faithful prototype box, with a saturation-safe fallback.
+    """Paper-faithful prototype box, robust to saturated activation maps.
 
     Primary: the 95th-percentile high-activation region of the cubic-upsampled
-    map (``activation_bbox`` == the original ``find_high_activation_crop``).
-    When the activation is degenerate (flat/saturated -> the percentile mask is
-    empty), fall back to boxing the argmax grid cell so a box is always drawn.
+    map (``activation_bbox`` == the original ``find_high_activation_crop``). This
+    is the box the paper draws in its "this looks like that" figures.
+
+    Fallback: a weakly-trained prototype can produce a flat/saturated similarity
+    map whose 95th-percentile pixels are scattered by noise, so the enclosing
+    rectangle degenerates into an arbitrary box covering much of the image (or is
+    empty). In that case — an empty box, or one wider than ``DIFFUSE_AREA_FRAC``
+    of the image — we instead draw a receptive-field box centred on the
+    most-activated grid cell (``RF_CELLS`` cells wide): a stable, localised region
+    rather than a noise-driven one. The deeper cure for diffuse maps is a
+    well-clustered latent space (the iterative push schedule), after which the
+    primary percentile box is used as normal.
     """
     box = activation_bbox(activation, size, BBOX_PERCENTILE)
-    if box is None and location is not None and grid_size is not None:
-        box = cell_bbox(location, grid_size, size[0])
+    height, width = size
+    diffuse = box is not None and (
+        (box[2] - box[0]) * (box[3] - box[1]) > DIFFUSE_AREA_FRAC * width * height
+    )
+    if (box is None or diffuse) and location is not None and grid_size is not None:
+        return cell_bbox(location, grid_size, size[0], expand=(RF_CELLS - 1.0) / 2.0)
     return box
 
 
