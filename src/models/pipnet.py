@@ -9,10 +9,6 @@ from torchvision import models
 from .base_model import PrototypeModel
 
 
-# ============================================================
-# Utilities
-# ============================================================
-
 def l2_convolution(
     x: torch.Tensor,
     prototypes: torch.Tensor,
@@ -62,10 +58,6 @@ def distances_to_similarity(
 
     return torch.log((distances + 1.0) / (distances + eps))
 
-
-# ============================================================
-# Backbone Factory
-# ============================================================
 
 def build_backbone(
     backbone_name: str = "resnet50",
@@ -174,10 +166,6 @@ def build_backbone(
     return features, out_channels
 
 
-# ============================================================
-# PIPNet
-# ============================================================
-
 class PIPNet(PrototypeModel):
     """
     PIP-Net implementation.
@@ -206,16 +194,11 @@ class PIPNet(PrototypeModel):
         init_scale: float = 0.1,
         sparsity_threshold: float = 1e-3,
     ):
-        # ====================================================
-        # Backbone (build before super().__init__)
-        # ====================================================
-
         feature_extractor, backbone_channels = build_backbone(
             backbone_name=backbone_name,
             pretrained=pretrained,
         )
 
-        # Call parent __init__ with backbone and num_classes
         super().__init__(backbone=feature_extractor, num_classes=num_classes)
 
         self.num_prototypes = num_prototypes
@@ -225,10 +208,6 @@ class PIPNet(PrototypeModel):
 
         # Alias for compatibility
         self.feature_extractor = self.backbone
-
-        # ====================================================
-        # Projection Layer
-        # ====================================================
 
         self.projector = nn.Sequential(
             nn.Conv2d(
@@ -241,10 +220,6 @@ class PIPNet(PrototypeModel):
             nn.ReLU(inplace=True),
         )
 
-        # ====================================================
-        # Prototype Layer
-        # ====================================================
-
         self.prototype_vectors = nn.Parameter(
             torch.randn(
                 num_prototypes,
@@ -254,25 +229,13 @@ class PIPNet(PrototypeModel):
             ) * init_scale
         )
 
-        # ====================================================
-        # Sparse Classification Layer
-        # ====================================================
-
         self.classifier = nn.Linear(
             num_prototypes,
             num_classes,
             bias=classifier_bias,
         )
 
-        # ====================================================
-        # Initialization
-        # ====================================================
-
         self._initialize_weights()
-
-    # ========================================================
-    # Initialization
-    # ========================================================
 
     def _initialize_weights(self):
 
@@ -293,10 +256,6 @@ class PIPNet(PrototypeModel):
             self.classifier.weight
         )
 
-    # ========================================================
-    # Feature Extraction
-    # ========================================================
-
     def extract_features(
         self,
         x: torch.Tensor
@@ -306,10 +265,6 @@ class PIPNet(PrototypeModel):
         x = self.projector(x)
 
         return x
-
-    # ========================================================
-    # Prototype Matching
-    # ========================================================
 
     def compute_distances(
         self,
@@ -334,10 +289,6 @@ class PIPNet(PrototypeModel):
 
         return similarities
 
-    # ========================================================
-    # Prototype Pooling
-    # ========================================================
-
     def global_max_pool(
         self,
         similarities: torch.Tensor
@@ -353,10 +304,6 @@ class PIPNet(PrototypeModel):
         )
 
         return pooled, indices
-
-    # ========================================================
-    # Forward
-    # ========================================================
 
     def forward(
         self,
@@ -407,10 +354,6 @@ class PIPNet(PrototypeModel):
             "features": features,
         }
 
-    # ========================================================
-    # Prediction
-    # ========================================================
-
     @torch.no_grad()
     def predict(
         self,
@@ -423,10 +366,6 @@ class PIPNet(PrototypeModel):
             outputs["logits"],
             dim=1
         )
-
-    # ========================================================
-    # Explanation Utilities
-    # ========================================================
 
     @torch.no_grad()
     def get_topk_prototypes(
@@ -459,10 +398,6 @@ class PIPNet(PrototypeModel):
         outputs = self.forward_with_details(x)
 
         return outputs["similarity_maps"]
-
-    # ========================================================
-    # Losses
-    # ========================================================
 
     def classification_loss(
         self,
@@ -572,20 +507,12 @@ class PIPNet(PrototypeModel):
             lambda_orth=lambda_orth,
         )
 
-    # ========================================================
-    # Compatibility methods
-    # ========================================================
-
     def push_prototypes(self, train_loader, device: str | torch.device) -> None:
         """
         Optional prototype anchoring (no-op for PIPNet).
         Implements method from PrototypeModel.
         """
         pass
-
-    # ========================================================
-    # Prototype Utilities
-    # ========================================================
 
     @torch.no_grad()
     def prototype_similarity_matrix(
@@ -629,7 +556,6 @@ class PIPNet(PrototypeModel):
         if removed == 0:
             return 0
 
-        # Update prototype vectors
 
         self.prototype_vectors = nn.Parameter(
             self.prototype_vectors.data[
@@ -637,7 +563,6 @@ class PIPNet(PrototypeModel):
             ]
         )
 
-        # Update classifier
 
         old_weights = self.classifier.weight.data[
             :,
@@ -664,10 +589,6 @@ class PIPNet(PrototypeModel):
         self.num_prototypes = len(keep_indices)
 
         return removed
-
-    # ========================================================
-    # Abstract Method Implementations
-    # ========================================================
 
     def explain(
         self,
@@ -700,10 +621,6 @@ class PIPNet(PrototypeModel):
         """
         return [self.prototype_vectors]
 
-    # ========================================================
-    # Freezing Utilities
-    # ========================================================
-
     def freeze_backbone(self):
 
         for param in self.feature_extractor.parameters():
@@ -721,10 +638,6 @@ class PIPNet(PrototypeModel):
     def unfreeze_prototypes(self):
 
         self.prototype_vectors.requires_grad = True
-
-    # ========================================================
-    # Model Info
-    # ========================================================
 
     def extra_repr(self) -> str:
 

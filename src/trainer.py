@@ -101,11 +101,9 @@ class Trainer:
                 if isinstance(self.model, PrototypeModel):
                     print("Pushing prototypes...")
                     self.model.push_prototypes(train_loader, self.device)
-                    # freeze backbone, add_on_layers, and concept_vectors so the
-                    # embedding space stays fixed and only the classifier updates.
 
                     # leaving add_on_layers trainable would shift the embedding space
-                    # and de-anchor the concept_vectors from their pushed patches.
+                    # and de-anchor the concept_vectors from their pushed patches
                     if hasattr(self.model, "freeze_backbone"):
                         self.model.freeze_backbone()
                     if hasattr(self.model, "add_on_layers"):

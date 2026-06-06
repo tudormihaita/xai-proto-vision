@@ -1,27 +1,3 @@
-"""
-TesNet: Transparent Embedding Space Network
-Paper: "Interpretable Image Recognition by Constructing Transparent Embedding Space"
-       Wang, Liu, Wang & Jing - ICCV 2021
-
-Architecture:
-  backbone  -> add_on_layers (bottleneck + sigmoid) -> concept projection
-            -> global max pool -> linear classifier
-
-Concept projection:
-  - concept_vectors: (num_concepts_per_class × num_classes, concept_dim, 1, 1) explicit parameter
-  - normalized before each conv2d so inner product = cosine similarity at each spatial location
-  - global max pool picks the single best-matching location per concept across the feature map
-  - each concept belongs to exactly one class (prototype_class_identity buffer); scales to any dataset
-
-Loss:
-  total = CE(logits, y)
-        + λ_clst  * cluster_loss           (pull features toward same-class concepts)
-        − λ_sep   * sep_loss               (push features away from other-class concepts)
-        + λ_ortho * ||C_c C_c^T − I||²_F   (within-class orthogonality per class c)
-        − λ_ss    * mean||P_c1 − P_c2||_F  (push class subspaces apart, Grassmann)
-        + λ_l1    * ||W_cls||_1            (sparsity on classifier weights)
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,7 +7,18 @@ from src.models.base_model import PrototypeModel, build_backbone
 
 class TesNet(PrototypeModel):
     """
-    TesNet prototype model with a ResNet or VGG backbone.
+    TesNet: Transparent Embedding Space Network
+    Prototype-based model with a ResNet or VGG backbone.
+
+    Architecture:
+        backbone  -> add_on_layers (bottleneck + sigmoid) -> concept projection
+            -> global max pool -> linear classifier
+
+    Concept projection:
+      - concept_vectors: (num_concepts_per_class × num_classes, concept_dim, 1, 1) explicit parameter
+      - normalized before each conv2d so inner product = cosine similarity at each spatial location
+      - global max pool picks the single best-matching location per concept across the feature map
+      - each concept belongs to exactly one class (prototype_class_identity buffer); scales to any dataset
 
     Parameters
     backbone_name : str
@@ -69,7 +56,7 @@ class TesNet(PrototypeModel):
         super().__init__(backbone, num_classes)
 
         self.num_concepts_per_class = num_concepts_per_class
-        self.num_concepts  = num_concepts_per_class * num_classes   # total concept count
+        self.num_concepts  = num_concepts_per_class * num_classes
         self.feature_dim   = feature_dim
         self.concept_dim   = concept_dim
         self.lambda_clst   = lambda_clst
@@ -78,7 +65,7 @@ class TesNet(PrototypeModel):
         self.lambda_ss     = lambda_ss
         self.lambda_l1     = lambda_l1
 
-        # prototype_class_identity[k, c] = 1  iff concept k belongs to class c.
+        # prototype_class_identity[k, c] = 1  iff concept k belongs to class c
         class_identity = torch.zeros(self.num_concepts, num_classes)
         for k in range(self.num_concepts):
             class_identity[k, k // num_concepts_per_class] = 1
@@ -125,7 +112,7 @@ class TesNet(PrototypeModel):
         self._init_classifier(incorrect_strength=-0.5)
 
     def _init_classifier(self, incorrect_strength: float = -0.5) -> None:
-        positive = self.prototype_class_identity.T          # (num_classes, num_concepts)
+        positive = self.prototype_class_identity.T
         negative = 1 - positive
         self.classifier.weight.data.copy_(
             1.0 * positive + incorrect_strength * negative
@@ -199,10 +186,9 @@ class TesNet(PrototypeModel):
         sep_loss  : mean of each image's min distance to other-class concepts
                     (we want this large -> applied with negative sign in total)
         """
-        # reduce spatial dimensions: min distance per concept over all locations -> (B, K)
         min_per_concept = cos_dists.flatten(2).min(dim=2).values
 
-        # boolean mask (B, K): True where concept k belongs to image i's class
+        # boolean mask (B, K): true where concept k belongs to image i's class
         # prototype_class_identity is (K, num_classes); indexing by labels gives (K, B)
         same = self.prototype_class_identity[:, labels].T.bool()   # (B, K)
 
@@ -306,7 +292,6 @@ class TesNet(PrototypeModel):
                 features = self.add_on_layers(self.backbone(images))   # (B, D, H, W)
                 B, D, H, W = features.shape
 
-                # flatten spatial locations into one axis
                 patches      = features.permute(0, 2, 3, 1).reshape(B * H * W, D)  # (N, D)
                 patch_labels = labels.repeat_interleave(H * W)                      # (N,)
                 concepts_n   = F.normalize(self.concept_vectors[:, :, 0, 0], p=2, dim=1)  # (K, D)
@@ -358,12 +343,9 @@ class TesNet(PrototypeModel):
 
         target = set(concept_indices) if concept_indices is not None else set(range(self.num_concepts))
 
-        # Streaming top-n: keep only top_n candidates per concept at all times.
-        # self.explain() still produces a (B, K, H, W) tensor per batch, but we
-        # avoid accumulating all batches into a single (N, K, H, W) dataset tensor.
         top_scores: dict[int, list[tuple[float, int]]] = {k: [] for k in target}
         all_images: list[torch.Tensor] = []
-        # Per-image concept maps stored sparsely: img_idx → {concept_idx: map}
+
         sparse_maps: list[dict[int, torch.Tensor]] = []
 
         offset = 0

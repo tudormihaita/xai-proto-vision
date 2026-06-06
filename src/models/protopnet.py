@@ -17,12 +17,9 @@ import torch.nn.functional as F
 from src.models.base_model import PrototypeModel, build_backbone
 from src.trainer import Trainer
 
-# floor to avoid log(0) in similarity conversion
 SIMILARITY_EPS = 1e-4
-# Chen et al. 2019 constrained-classifier init
 CORRECT_CLASS_CONNECTION = 1.0
 INCORRECT_CLASS_CONNECTION = -0.5
-# Default loss coefficients from the original paper.
 DEFAULT_CLUSTER_COEF = 0.8
 DEFAULT_SEPARATION_COEF = -0.08
 # L1 on non-class FC weights (paper coefs['l1'])
@@ -155,7 +152,6 @@ class ProtoPNet(PrototypeModel):
         self.prototype_source_rows.copy_(rows)
         self.prototype_source_cols.copy_(cols)
 
-    # ----------------------------------------------------------------- setup
     def _init_add_on_weights(self) -> None:
         """kaiming_normal (fan_out) to match Chen et al. — PyTorch default is kaiming_uniform."""
         for module in self.add_on_layers.modules():
@@ -173,7 +169,6 @@ class ProtoPNet(PrototypeModel):
         )
         self.classifier.weight.data.copy_(weight)
 
-    # ------------------------------------------------------------- internals
     def _conv_features(self, x: torch.Tensor) -> torch.Tensor:
         """Backbone + add-on layers -> (B, prototype_dim, H, W)."""
         return self.add_on_layers(self.backbone(x))
@@ -209,7 +204,6 @@ class ProtoPNet(PrototypeModel):
         self._cached_min_distances = min_distances
         return logits, min_distances
 
-    # --------------------------------------------------------------- BaseModel
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         logits, _ = self._logits_and_min_distances(x)
         return logits
@@ -235,7 +229,6 @@ class ProtoPNet(PrototypeModel):
             "activation_maps": activation_maps,
         }
 
-    # ----------------------------------------------------------- PrototypeModel
     def compute_loss(
         self,
         logits: torch.Tensor,
@@ -315,7 +308,6 @@ class ProtoPNet(PrototypeModel):
         best_vectors = self.prototype_vectors.detach().clone()
         sources: list[tuple[int, int, int] | None] = list(self.prototype_source_info)
 
-        # Precompute the prototype indices owned by each class.
         class_to_protos = [
             torch.nonzero(self.prototype_class_identity[:, c], as_tuple=True)[0]
             for c in range(self.num_classes)
@@ -378,7 +370,6 @@ class ProtoPNet(PrototypeModel):
         non_class = 1.0 - self.prototype_class_identity.t()  # (num_classes, P)
         return (self.classifier.weight * non_class).abs().sum()
 
-    # --------------------------------------------------------------- phasing
     @staticmethod
     def _set_grad(module: nn.Module, requires_grad: bool) -> None:
         for param in module.parameters():
@@ -457,7 +448,6 @@ class ProtoPNetTrainer(Trainer):
         # every improvement so a long run survives an early interruption.
         self._checkpoint_path: str | None = None
 
-    # ---- optimizers
     # weight decay on backbone + add-ons only; prototypes are free to move, last layer uses L1
     def _warm_optimizer(self) -> torch.optim.Optimizer:
         return torch.optim.Adam([
@@ -481,7 +471,6 @@ class ProtoPNetTrainer(Trainer):
         # last layer kept sparse by L1, not weight decay
         return torch.optim.Adam(self.model.get_classifier_params(), lr=self.last_lr)
 
-    # -------------------------------------------------------------- overrides
     def _set_phase(self, phase: str) -> None:
         self.model.set_phase(phase)
         self._current_phase = phase
@@ -496,7 +485,6 @@ class ProtoPNetTrainer(Trainer):
     def push_prototypes(self, train_loader) -> None:
         self.model.push_prototypes(train_loader, self.device)
 
-    # ------------------------------------------------------------------- loop
     def _train_one_epoch(self, label: str, train_loader, history: dict) -> None:
         """Run one epoch, appending its metrics to the base-format history."""
         metrics = self._train_epoch(train_loader)
@@ -621,7 +609,6 @@ class ProtoPNetTrainer(Trainer):
         return history
 
 
-# --------------------------------------------------------------------- metrics
 def count_trainable_params(model: nn.Module) -> int:
     """Number of parameters with ``requires_grad=True``."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
