@@ -247,7 +247,7 @@ class Trainer:
             {
                 "epoch": epoch,
                 "model_state": self.model.state_dict(),
-                "optimizer_state": self.optimizer.state_dict(),
+                "optimizer_state": self.optimizer.state_dict() if self.optimizer else None,
                 "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
                 "history": history,
             },
@@ -259,7 +259,8 @@ class Trainer:
         """Loads full training state. Returns the saved history dict."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        if self.optimizer is not None and checkpoint.get("optimizer_state") is not None:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         if self.scheduler is not None and checkpoint.get("scheduler_state"):
             self.scheduler.load_state_dict(checkpoint["scheduler_state"])
         print(f"Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
