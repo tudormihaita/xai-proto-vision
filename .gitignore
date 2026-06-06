@@ -239,3 +239,6 @@ protopnet_paper/
 .agents/
 *.zip
 *.tgz
+
+# MacOS specific files
+**/.DS_Store
