@@ -27,7 +27,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.constants import CHECKPOINTS_ROOT, RESULTS_ROOT
-from src.data import load_dataset
+from src.data import get_transforms, load_dataset
 from src.evaluate import evaluate_model, print_results
 from src.trainer import Trainer
 
@@ -73,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth",              type=int,                              default=6)
     p.add_argument("--sparsity-threshold", dest="sparsity_threshold", type=float, default=0.1)
     p.add_argument("--push-epoch",         dest="push_epoch",         type=int,   default=None)
+    p.add_argument("--push-batch-size",    dest="push_batch_size",    type=int,   default=None)
+    p.add_argument("--save-every",         dest="save_every",         type=int,   default=None,
+                   help="ProtoPNet only: save *_latest recovery checkpoint every N joint epochs")
     p.add_argument("--lambda-ortho",       dest="lambda_ortho",       type=float, default=1e-4,
                    help="TesNet: within-class orthogonality weight (paper value: 1e-4)")
     p.add_argument("--lambda-clst",        dest="lambda_clst",        type=float, default=0.8,
@@ -160,6 +163,25 @@ def build_scheduler(args, optimizer, num_epochs: int):
 
 
 def build_trainer(args, model: nn.Module) -> Trainer:
+    # ProtoPNet does phased optimization (warm/joint/last with its own per-phase
+    # optimizers + LR schedule), so it manages its own optimizer/scheduler rather
+    # than the generic ones built below. --epochs maps to the joint stage.
+    if args.method == "protopnet":
+        from src.models.protopnet import ProtoPNetTrainer
+
+        warm_epochs = min(5, args.epochs)
+        return ProtoPNetTrainer(
+            model,
+            device=args.device,
+            warm_epochs=warm_epochs,
+            joint_epochs=max(1, args.epochs - warm_epochs),
+            push_interval=10,
+            last_layer_iters=20,
+            joint_lr_step_size=5,
+            joint_lr_gamma=0.1,
+            weight_decay=args.weight_decay,
+        )
+
     optimizer = build_optimizer(args, model)
     scheduler = build_scheduler(args, optimizer, args.epochs)
 
@@ -201,6 +223,19 @@ def main() -> None:
     val_loader   = DataLoader(load_dataset(args.dataset, "val",   **dataset_kwargs), shuffle=False, **loader_kwargs)
     test_loader  = DataLoader(load_dataset(args.dataset, "test",  **dataset_kwargs), shuffle=False, **loader_kwargs)
 
+    push_loader = None
+    if args.method == "protopnet":
+        push_ds = load_dataset(args.dataset, "train", **dataset_kwargs)
+        # clean deterministic views; source indices must be stable across runs
+        push_ds.transform = get_transforms("test", 224)
+        push_loader = DataLoader(
+            push_ds,
+            batch_size=args.push_batch_size or args.batch_size,
+            shuffle=False,
+            num_workers=args.workers,
+            pin_memory=True,
+        )
+
     model = build_model(args)
     model.to(args.device)
 
@@ -230,14 +265,17 @@ def main() -> None:
             torch.cuda.reset_peak_memory_stats(args.device)
 
         t0 = time.time()
-        trainer.train(
-            train_loader, val_loader,
+        train_kwargs = dict(
             epochs=args.epochs,
             val_every=args.val_every,
             push_epoch=args.push_epoch,
             patience=args.patience,
             checkpoint_path=ckpt_path_to_use,
         )
+        if args.method == "protopnet":
+            train_kwargs["push_loader"] = push_loader
+            train_kwargs["save_every"] = args.save_every
+        trainer.train(train_loader, val_loader, **train_kwargs)
         train_minutes = (time.time() - t0) / 60
         print(f"\nTraining complete in {train_minutes:.1f} min; Best checkpoint: {ckpt_path}")
 

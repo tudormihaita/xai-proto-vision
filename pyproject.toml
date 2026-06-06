@@ -47,3 +47,7 @@ select = ["E", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "unit: fast, isolated unit tests",
+    "integration: tests that exercise multiple components together",
+]

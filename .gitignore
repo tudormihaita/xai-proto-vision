@@ -228,3 +228,14 @@ checkpoints/*
 # Results outputs: can be removed later for final versions
 results/*
 !results/.gitkeep
+
+
+
+tests/
+final_experiments/
+raul_docs/
+experiments/
+protopnet_paper/
+.agents/
+*.zip
+*.tgz
