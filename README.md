@@ -15,10 +15,10 @@ different angle, and each one builds on the limitations of the previous:
 
 | Method | Year | Core Idea | Key Limitation | Member assigned  |
 |---|---|---|---|-----|
-| [ProtoPNet](https://arxiv.org/abs/1806.10574) | 2019 | Class-specific prototype patches in latent space | Prototypes are abstract, class-specific — redundant | Raul (Member B)  |
-| [ProtoTree](https://arxiv.org/abs/2012.02046) | 2021 | Shared prototypes organized as a soft decision tree | Soft routing blurs decision paths | Razvan (Member C) |
+| [ProtoPNet](https://proceedings.neurips.cc/paper/2019/file/adf7ee2dcf142b0e11888e72b43fcb75-Paper.pdf) | 2019 | Class-specific prototype patches in latent space | Prototypes are abstract, class-specific — redundant | Raul (Member B)  |
+| [ProtoTree](https://openaccess.thecvf.com/content/CVPR2021/papers/Nauta_Neural_Prototype_Trees_for_Interpretable_Fine-Grained_Image_Recognition_CVPR_2021_paper.pdf) | 2021 | Shared prototypes organized as a soft decision tree | Soft routing blurs decision paths | Razvan (Member C) |
 | [TesNet](https://openaccess.thecvf.com/content/ICCV2021/papers/Wang_Interpretable_Image_Recognition_by_Constructing_Transparent_Embedding_Space_ICCV_2021_paper.pdf) | 2021 | Orthogonal concept basis vectors in embedding space | Concepts may not be human-meaningful | Tudor  (Member A) | 
-| [PIPNet](https://arxiv.org/abs/2307.03672) | 2023 | Sparse activation over real training image patches | Sensitive sparsity threshold hyperparameter | Dragos (Member D) |
+| [PIPNet](https://openaccess.thecvf.com/content/CVPR2023/papers/Nauta_PIP-Net_Patch-Based_Intuitive_Prototypes_for_Interpretable_Image_Classification_CVPR_2023_paper.pdf) | 2023 | Sparse activation over real training image patches | Sensitive sparsity threshold hyperparameter | Dragos (Member D) |
 
 **Backbone:** ResNet-34 pretrained on ImageNet  
 **Dataset:** CUB-200-2011 (200 fine-grained bird species, 11,788 images)  
@@ -217,7 +217,7 @@ bash experiments/protopnet.sh
 # etc.
 ```
 
-### Evaluation and visualisation
+### Evaluation and visualization
 
 Open the notebooks in `notebooks/` for prototype visualizations, tree decision
 paths, and the results comparison table/figures.
@@ -366,7 +366,7 @@ interpretability capacity. This is the main result table in the report.
 ### Step 2 — Cross-dataset validation (Stanford Cars)
 
 Take the best configuration from Step 1 and retrain on Stanford Cars.
-Demonstrates whether results generalise beyond CUB-200.
+Demonstrates whether results generalize beyond CUB-200.
 
 ```bash
 # Example for TesNet with best config (num-concepts 32)
@@ -383,41 +383,3 @@ for 224×224 input so no model changes are required.
 python scripts/run_train.py --method tesnet --num-concepts 32 --backbone vgg16 --dataset cub200 --epochs 100
 ```
 
----
-
-## Expected Results (CUB-200)
-
-| Method | Expected Top-1 Acc. | Gap vs Baseline |
-|---|---|---|
-| ResNet-34 Baseline | ~74% | — |
-| ProtoPNet | ~70–72% | -2 to -4% |
-| ProtoTree | ~68–71% | -3 to -6% |
-| TesNet | ~71–73% | -1 to -3% |
-| PIPNet | ~72–74% | ~0 to -2% |
-
-**Key finding:** interpretability costs roughly 2–5% accuracy; PIPNet closes the
-gap most effectively through real-patch constraints and sparse activation.
-
----
-
-## Git Workflow
-
-```
-main                 ← stable only; never push broken code here
-├── feature/backbone       ← Member A (Phase 1)
-├── feature/protopnet      ← Member B
-├── feature/prototree      ← Member C
-├── feature/tesnet         ← Member A
-└── feature/pipnet         ← Member D
-```
-
-**Rule:** only merge to `main` when the method trains end-to-end without errors.
-
-```bash
-# Start your feature branch
-git checkout -b feature/protopnet
-
-# Commit incrementally; merge to main only when end-to-end works
-git push origin feature/protopnet
-# then open a PR for review before merging
-```
