@@ -28,15 +28,13 @@ class Trainer:
         device: str | torch.device,
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         log_every: int = 0,
-        warm_epochs: int = 0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.device = device
         self.scheduler = scheduler
-        self.log_every = log_every        # log intra-epoch every N batches; 0 = epoch-level only
-        self.warm_epochs = warm_epochs    # freeze backbone for first N epochs (0 = disabled)
+        self.log_every = log_every  # log intra-epoch every N batches; 0 = epoch-level only
         self._step_log: list[tuple[float, float]] = []
 
 
@@ -96,24 +94,14 @@ class Trainer:
             for k, v in train_metrics.items(): # extra loss components
                 history.setdefault(k, []).append(v)
 
-            # prototype push step
+            # prototype push step (only relevant for ProtoPNet and ProtoTree)
             if push_epoch is not None and epoch == push_epoch:
                 if isinstance(self.model, PrototypeModel):
                     print("Pushing prototypes...")
                     self.model.push_prototypes(train_loader, self.device)
-                    # freeze backbone, add_on_layers, and concept_vectors so the
-                    # embedding space stays fixed and only the classifier updates.
-
-                    # leaving add_on_layers trainable would shift the embedding space
-                    # and de-anchor the concept_vectors from their pushed patches.
-                    if hasattr(self.model, "freeze_backbone"):
-                        self.model.freeze_backbone()
-                    if hasattr(self.model, "add_on_layers"):
-                        for p in self.model.add_on_layers.parameters():
-                            p.requires_grad_(False)
-                    if hasattr(self.model, "concept_vectors"):
-                        self.model.concept_vectors.requires_grad_(False)
-                    print("Post-push: backbone, add-on layers and concepts frozen — classifier fine-tuning")
+                    # Optional: model-specific post-push initialization
+                    if hasattr(self.model, "post_push_init"):
+                        self.model.post_push_init()
                 else:
                     print(f"Warning: --push-epoch set but {type(self.model).__name__} is not a PrototypeModel")
 
@@ -158,14 +146,6 @@ class Trainer:
 
     def _train_epoch(self, loader, epoch: int = 0) -> dict:
         """Runs one training epoch. Returns a metrics dict."""
-        if self.warm_epochs > 0 and hasattr(self.model, "freeze_backbone"):
-            if epoch == 1:
-                self.model.freeze_backbone()
-                print("Warm phase: backbone frozen")
-            elif epoch == self.warm_epochs + 1:
-                self.model.unfreeze_backbone()
-                print("Joint phase: backbone unfrozen")
-
         self.model.train()
 
         running: dict[str, float] = {}
@@ -247,7 +227,7 @@ class Trainer:
             {
                 "epoch": epoch,
                 "model_state": self.model.state_dict(),
-                "optimizer_state": self.optimizer.state_dict() if self.optimizer else None,
+                "optimizer_state": self.optimizer.state_dict(),
                 "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
                 "history": history,
             },
@@ -259,8 +239,7 @@ class Trainer:
         """Loads full training state. Returns the saved history dict."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state"])
-        if self.optimizer is not None and checkpoint.get("optimizer_state") is not None:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         if self.scheduler is not None and checkpoint.get("scheduler_state"):
             self.scheduler.load_state_dict(checkpoint["scheduler_state"])
         print(f"Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
