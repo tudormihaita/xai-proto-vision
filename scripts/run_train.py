@@ -121,7 +121,12 @@ def build_model(args) -> nn.Module:
 
     if args.method == "prototree":
         from src.models.prototree import ProtoTree
-        return ProtoTree(backbone_name=args.backbone, num_classes=num_classes, depth=args.depth)
+        return ProtoTree(
+            backbone_name=args.backbone,
+            num_classes=num_classes,
+            depth=args.depth,
+            lambda_cluster=args.lambda_clst,
+        )
 
     if args.method == "pipnet":
         from src.models.pipnet import PIPNet
