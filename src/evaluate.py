@@ -92,8 +92,7 @@ def evaluate_model(
 def print_results(results: dict, model_name: str = "") -> None:
     """Pretty-prints the evaluate_model() output for quick inspection."""
     prefix = f"[{model_name}] " if model_name else ""
-    # per_class_accuracy may be a numpy array (direct from evaluate_model)
-    # or already summarized as mean/std keys (after run_train.py post-processing)
+
     if "per_class_accuracy" in results:
         pca_str = f"mean_per_class_acc={results['per_class_accuracy'].mean():.4f}"
     else:
